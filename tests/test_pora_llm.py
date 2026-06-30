@@ -2,6 +2,8 @@
 """Unit tests for pora_llm.py — uses mock_chat fixture to avoid real LLM calls."""
 from __future__ import annotations
 
+import pytest
+
 import pora_llm as ai
 
 
@@ -125,6 +127,105 @@ class TestValidateAgainstSource:
 # --------------------------------------------------------------------------
 # extract_jsonld
 # --------------------------------------------------------------------------
+class TestExtractMainContent:
+    def test_picks_article(self):
+        html = "<html><body><nav>menu</nav><article>real content</article><footer>x</footer></body></html>"
+        assert "real content" in ai.extract_main_content(html)
+
+    def test_picks_main(self):
+        html = "<html><body><header>x</header><main>recipe content</main></body></html>"
+        out = ai.extract_main_content(html)
+        assert "recipe content" in out
+        # main wins over nav/header stripping
+        assert "recipe content" in ai.html_to_text(out)
+
+    def test_falls_back_to_body_minus_boilerplate(self):
+        html = "<html><body><nav>menu items</nav><div>content X</div><footer>fine print</footer></body></html>"
+        text = ai.html_to_text(ai.extract_main_content(html))
+        assert "content X" in text
+        assert "menu items" not in text
+        assert "fine print" not in text
+
+
+class TestWebFetch:
+    def test_returns_url_status_html_text(self, monkeypatch):
+        import httpx as _httpx
+
+        class _Resp:
+            status_code = 200
+            url = "http://example.com/r"
+            text = "<html><body><main>Hello world</main></body></html>"
+
+            def raise_for_status(self):
+                pass
+
+        class _Client:
+            def __init__(self, *a, **kw): pass
+            def __enter__(self): return self
+            def __exit__(self, *a): pass
+            def get(self, url): return _Resp()
+
+        monkeypatch.setattr(_httpx, "Client", _Client)
+        out = ai.web_fetch("http://example.com/r", lang="ru")
+        assert out["status"] == 200
+        assert "Hello world" in out["text"]
+        assert out["html"].startswith("<html>")
+
+    def test_retries_on_5xx_then_succeeds(self, monkeypatch):
+        import httpx as _httpx
+
+        calls = {"n": 0}
+
+        class _Bad:
+            status_code = 503
+            url = "http://x"
+            text = ""
+
+            def raise_for_status(self):
+                raise _httpx.HTTPStatusError("bad", request=None, response=None)
+
+        class _Good:
+            status_code = 200
+            url = "http://x"
+            text = "<main>OK</main>"
+
+            def raise_for_status(self):
+                pass
+
+        class _Client:
+            def __init__(self, *a, **kw): pass
+            def __enter__(self): return self
+            def __exit__(self, *a): pass
+            def get(self, url):
+                calls["n"] += 1
+                return _Bad() if calls["n"] < 2 else _Good()
+
+        monkeypatch.setattr(_httpx, "Client", _Client)
+        out = ai.web_fetch("http://x", retries=2)
+        assert out["status"] == 200
+        assert calls["n"] >= 2
+
+    def test_propagates_after_max_retries(self, monkeypatch):
+        import httpx as _httpx
+
+        class _Client:
+            def __init__(self, *a, **kw): pass
+            def __enter__(self): return self
+            def __exit__(self, *a): pass
+            def get(self, url):
+                raise _httpx.RequestError("connection refused")
+
+        monkeypatch.setattr(_httpx, "Client", _Client)
+        with pytest.raises(_httpx.HTTPError):
+            ai.web_fetch("http://x", retries=1)
+
+    def test_accept_language_built_from_lang(self):
+        # private helper but worth a smoke test — verifies lang flows into header
+        assert ai._accept_language("ru").startswith("ru")
+        assert ai._accept_language(None).startswith("en")
+        assert ai._accept_language("pt-BR").startswith("pt")
+
+
 class TestExtractJsonld:
     def test_simple_recipe(self):
         html = '<script type="application/ld+json">{"@type":"Recipe","name":"Carbonara","recipeIngredient":["Spaghetti 400g","Eggs 4"]}</script>'
@@ -216,34 +317,30 @@ class TestExtractRecipeFromText:
 # --------------------------------------------------------------------------
 # parse_recipe (full flow: httpx mocked)
 # --------------------------------------------------------------------------
+def _fake_fetch(html: str, url: str = "http://example.com/r"):
+    """Helper: build a web_fetch return shape from a chunk of HTML."""
+    return {"url": url, "status": 200, "html": html, "text": ai.html_to_text(ai.extract_main_content(html))}
+
+
 class TestParseRecipe:
     def test_jsonld_path_no_llm_call(self, monkeypatch):
-        import httpx as _httpx
         html = '<html><script type="application/ld+json">{"@type":"Recipe","name":"Carbonara","recipeIngredient":["Spaghetti 400g","Eggs 4"]}</script></html>'
-
-        class _Resp:
-            text = html
-
-        monkeypatch.setattr(_httpx, "get", lambda *a, **kw: _Resp())
-        # _chat must NOT be called — guarantee by raising
-        monkeypatch.setattr(ai, "_chat", lambda *a, **kw: (_ for _ in ()).throw(AssertionError("_chat must not be called for JSON-LD path")))
+        monkeypatch.setattr(ai, "web_fetch", lambda *a, **kw: _fake_fetch(html))
+        # _chat must NOT be called for the JSON-LD path
+        monkeypatch.setattr(ai, "_chat",
+                            lambda *a, **kw: (_ for _ in ()).throw(AssertionError("_chat called on JSON-LD path")))
 
         import brain
         recipe = ai.parse_recipe("http://example.com/r", brain.Categorizer().fit())
         assert recipe.title == "Carbonara"
         assert recipe.source == "jsonld"
         assert len(recipe.ingredients) == 2
-        # each ingredient gets a section assigned
         for ing in recipe.ingredients:
             assert ing.section in brain.SECTIONS
 
     def test_llm_fallback_path(self, monkeypatch, mock_chat):
-        import httpx as _httpx
-
-        class _Resp:
-            text = "<html><body>Recipe: take Spaghetti 400g and Eggs 4.</body></html>"
-
-        monkeypatch.setattr(_httpx, "get", lambda *a, **kw: _Resp())
+        html = "<html><body>Recipe: take Spaghetti 400g and Eggs 4.</body></html>"
+        monkeypatch.setattr(ai, "web_fetch", lambda *a, **kw: _fake_fetch(html))
         mock_chat({
             "title": "Pasta",
             "ingredients": [{"raw": "Spaghetti 400g", "name": "spaghetti", "qty": 400, "unit": "g"}],
@@ -253,6 +350,18 @@ class TestParseRecipe:
         assert recipe.source == "llm"
         assert recipe.title == "Pasta"
         assert recipe.ingredients[0].section in brain.SECTIONS
+
+    def test_custom_sections_route_to_batched_llm(self, monkeypatch, mock_chat):
+        html = '<html><script type="application/ld+json">{"@type":"Recipe","name":"R","recipeIngredient":["bacon","eggs"]}</script></html>'
+        monkeypatch.setattr(ai, "web_fetch", lambda *a, **kw: _fake_fetch(html))
+        # only the batched LLM call should happen — return a per-ingredient mapping
+        mock_chat({"results": [{"name": "bacon", "section": "meat"},
+                                {"name": "eggs", "section": "protein"}]})
+        import brain
+        recipe = ai.parse_recipe("http://x", brain.Categorizer().fit(),
+                                 sections=["meat", "protein", "other"])
+        sections = sorted(i.section for i in recipe.ingredients)
+        assert sections == ["meat", "protein"]
 
 
 # --------------------------------------------------------------------------
@@ -271,6 +380,53 @@ class TestCategorizeLLM:
     def test_malformed_returns_other(self, mock_chat):
         mock_chat("nope")
         assert ai.categorize_llm("x") == ("other", 0.0)
+
+    def test_custom_sections_enum_used(self, mock_chat):
+        mock_chat({"section": "meat"})
+        key, conf = ai.categorize_llm("стейк", sections=["meat", "veg", "other"])
+        assert key == "meat" and conf == 0.9
+
+    def test_custom_sections_fallback_no_other(self, mock_chat):
+        # LLM disabled by default — fallback is the first section when 'other' is absent
+        ai.API_KEY = ""  # ensure disabled
+        key, conf = ai.categorize_llm("x", sections=["a", "b"])
+        assert key == "a" and conf == 0.0
+
+
+class TestCategorizeLLMBatch:
+    def test_empty_input(self):
+        assert ai.categorize_llm_batch([]) == []
+
+    def test_disabled_returns_fallbacks(self):
+        out = ai.categorize_llm_batch(["a", "b"], sections=["meat", "veg", "other"])
+        assert out == [("other", 0.0), ("other", 0.0)]
+
+    def test_disabled_no_other_falls_back_to_first(self):
+        out = ai.categorize_llm_batch(["a"], sections=["meat", "veg"])
+        assert out == [("meat", 0.0)]
+
+    def test_valid_batch_response_aligned_to_input_order(self, mock_chat):
+        mock_chat({"results": [
+            {"name": "молоко", "section": "dairy"},
+            {"name": "хлеб", "section": "bakery"},
+        ]})
+        out = ai.categorize_llm_batch(["молоко", "хлеб"])
+        assert out == [("dairy", 0.9), ("bakery", 0.9)]
+
+    def test_partial_response_unmapped_get_fallback(self, mock_chat):
+        mock_chat({"results": [{"name": "молоко", "section": "dairy"}]})
+        out = ai.categorize_llm_batch(["молоко", "хлеб"])
+        assert out[0] == ("dairy", 0.9)
+        assert out[1] == ("other", 0.0)
+
+    def test_invalid_section_in_response_treated_as_unmapped(self, mock_chat):
+        mock_chat({"results": [{"name": "x", "section": "bogus"}]})
+        out = ai.categorize_llm_batch(["x"], sections=["a", "b", "other"])
+        assert out == [("other", 0.0)]
+
+    def test_malformed_returns_fallbacks(self, mock_chat):
+        mock_chat("not json")
+        assert ai.categorize_llm_batch(["a", "b"]) == [("other", 0.0)] * 2
 
 
 # --------------------------------------------------------------------------

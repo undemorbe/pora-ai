@@ -50,6 +50,36 @@ class TestCategorize:
         assert item["section"] == "other"
         assert item["method"] == "llm"
 
+    def test_custom_sections_always_route_to_batched_llm(self, client, mock_chat):
+        mock_chat({"results": [
+            {"name": "стейк", "section": "meat"},
+            {"name": "шпинат", "section": "greens"},
+        ]})
+        r = client.post("/v1/categorize", json={
+            "names": ["стейк", "шпинат"],
+            "sections": ["meat", "greens", "dairy", "other"],
+        })
+        results = r.json()["results"]
+        assert [x["section"] for x in results] == ["meat", "greens"]
+        assert all(x["method"] == "llm" for x in results)
+        # section_label echoes the key when no label map is given
+        assert results[0]["section_label"] == "meat"
+
+    def test_custom_section_labels_used_when_provided(self, client, mock_chat):
+        mock_chat({"results": [{"name": "стейк", "section": "meat"}]})
+        r = client.post("/v1/categorize", json={
+            "names": ["стейк"],
+            "sections": ["meat", "other"],
+            "section_labels": {"meat": "Мясной отдел"},
+        })
+        assert r.json()["results"][0]["section_label"] == "Мясной отдел"
+
+    def test_custom_sections_without_llm_uses_first_section_when_no_other(self, client):
+        r = client.post("/v1/categorize", json={
+            "names": ["x"], "sections": ["meat", "veg"],
+        })
+        assert r.json()["results"][0]["section"] == "meat"
+
 
 # --------------------------------------------------------------------------
 # /v1/replenishment
@@ -103,14 +133,16 @@ class TestRecommend:
 # /v1/parse-recipe
 # --------------------------------------------------------------------------
 class TestParseRecipeEndpoint:
+    @staticmethod
+    def _patch_fetch(monkeypatch, html: str):
+        import pora_llm
+        monkeypatch.setattr(pora_llm, "web_fetch",
+                            lambda *a, **kw: {"url": "http://x", "status": 200, "html": html,
+                                              "text": pora_llm.html_to_text(pora_llm.extract_main_content(html))})
+
     def test_jsonld_path(self, client, monkeypatch):
-        import httpx as _httpx
         html = '<script type="application/ld+json">{"@type":"Recipe","name":"Carbonara","recipeIngredient":["Spaghetti 400g","Eggs 4"]}</script>'
-
-        class _Resp:
-            text = html
-
-        monkeypatch.setattr(_httpx, "get", lambda *a, **kw: _Resp())
+        self._patch_fetch(monkeypatch, html)
         r = client.post("/v1/parse-recipe", json={"url": "http://x"})
         assert r.status_code == 200
         body = r.json()
@@ -119,12 +151,8 @@ class TestParseRecipeEndpoint:
         assert all("section" in i for i in body["ingredients"])
 
     def test_llm_fallback_validated(self, client, monkeypatch, mock_chat):
-        import httpx as _httpx
-
-        class _Resp:
-            text = "<html><body>Cook with Spaghetti 400g and Eggs 4.</body></html>"
-
-        monkeypatch.setattr(_httpx, "get", lambda *a, **kw: _Resp())
+        html = "<html><body>Cook with Spaghetti 400g and Eggs 4.</body></html>"
+        self._patch_fetch(monkeypatch, html)
         mock_chat({
             "title": "Pasta",
             "ingredients": [
@@ -135,18 +163,29 @@ class TestParseRecipeEndpoint:
         r = client.post("/v1/parse-recipe", json={"url": "http://x"})
         body = r.json()
         assert body["source"] == "llm"
-        # Dragon scales filtered out as not in source
         names = [i["name"] for i in body["ingredients"]]
         assert "spaghetti" in names
         assert "dragon" not in names
 
+    def test_custom_sections_via_endpoint(self, client, monkeypatch, mock_chat):
+        html = '<script type="application/ld+json">{"@type":"Recipe","name":"R","recipeIngredient":["bacon","spinach"]}</script>'
+        self._patch_fetch(monkeypatch, html)
+        mock_chat({"results": [{"name": "bacon", "section": "meat"},
+                                {"name": "spinach", "section": "greens"}]})
+        r = client.post("/v1/parse-recipe", json={
+            "url": "http://x", "sections": ["meat", "greens", "other"]
+        })
+        body = r.json()
+        assert sorted(i["section"] for i in body["ingredients"]) == ["greens", "meat"]
+
     def test_fetch_failure_returns_502(self, client, monkeypatch):
+        import pora_llm
         import httpx as _httpx
 
         def _boom(*a, **kw):
             raise _httpx.RequestError("dns fail")
 
-        monkeypatch.setattr(_httpx, "get", _boom)
+        monkeypatch.setattr(pora_llm, "web_fetch", _boom)
         r = client.post("/v1/parse-recipe", json={"url": "http://nope"})
         assert r.status_code == 502
 

@@ -20,6 +20,17 @@ class ReplenishmentRequest(BaseModel):
 class CategorizeRequest(BaseModel):
     names: list[str]
     lang: Optional[str] = Field(None, description="ru/en/… — если None, определим сами")
+    sections: Optional[list[str]] = Field(
+        None,
+        description="Custom store taxonomy (canonical KEYS, language-agnostic). "
+                    "If provided, the fast classifier is bypassed and the LLM is used "
+                    "with this enum. If None, brain.SECTIONS is used.",
+    )
+    section_labels: Optional[dict] = Field(
+        None,
+        description="Optional {section_key: localized_label} map for custom sections. "
+                    "If absent, the section key itself is echoed as section_label.",
+    )
 
 
 class NotifyTimeRequest(BaseModel):
@@ -35,6 +46,11 @@ class RecommendRequest(BaseModel):
 class ParseRecipeRequest(BaseModel):
     url: str
     lang: Optional[str] = None
+    sections: Optional[list[str]] = Field(
+        None,
+        description="Custom section taxonomy applied to every ingredient. "
+                    "If None, the fast classifier with brain.SECTIONS is used.",
+    )
 
 
 class TipRequest(BaseModel):

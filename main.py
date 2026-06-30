@@ -45,20 +45,58 @@ def replenishment(req: ReplenishmentRequest):
     return {"today": today.isoformat(), "predictions": brain.predict_replenishment(_parse_dates(req.purchases), today)}
 
 
+def _label_for(section: str, lang: str, custom_labels):
+    """Per-request section label resolution.
+
+    Custom taxonomies (req.sections set) use `req.section_labels` if provided,
+    else echo the section key. Default taxonomy uses brain.section_label.
+    """
+    if custom_labels and section in custom_labels:
+        return custom_labels[section]
+    if custom_labels is not None:
+        return section
+    return brain.section_label(section, lang)
+
+
 @app.post("/v1/categorize")
 def categorize(req: CategorizeRequest):
+    """Categorize grocery item names into store sections.
+
+    Routing:
+      - req.sections is None and lang ∈ FAST_LANGS → fast classifier (LLM escalation
+        only when confidence < 0.45 AND LLM enabled)
+      - req.sections is None and lang ∉ FAST_LANGS → per-item LLM with brain.SECTIONS
+      - req.sections is set → always batched LLM with the custom enum (one LLM call total)
+    """
     results = []
+    custom_labels = req.section_labels if req.sections else None
+
+    if req.sections:
+        # Custom taxonomy — one batched LLM call, regardless of language
+        if ai.llm_enabled():
+            tagged = ai.categorize_llm_batch(req.names, req.sections)
+        else:
+            fb = "other" if "other" in req.sections else req.sections[0]
+            tagged = [(fb, 0.0)] * len(req.names)
+        for name, (key, conf) in zip(req.names, tagged):
+            lang = req.lang or ai.detect_lang(name)
+            results.append({"name": name, "section": key,
+                            "section_label": _label_for(key, lang, custom_labels),
+                            "confidence": round(conf, 2), "lang": lang, "method": "llm"})
+        return {"results": results}
+
     for name in req.names:
         lang = req.lang or ai.detect_lang(name)
         if lang in FAST_LANGS:
             key, conf = _cat.predict(name)
             method = "fast"
-            if conf < 0.45 and ai.llm_enabled():     # неуверенно → уточняем LLM
+            if conf < 0.45 and ai.llm_enabled():
                 key, conf, method = *ai.categorize_llm(name), "llm"
         else:
-            key, conf = ai.categorize_llm(name)        # другой язык → LLM
+            key, conf = ai.categorize_llm(name)
             method = "llm"
-        results.append({"name": name, "section": key, "section_label": brain.section_label(key, lang),
+        results.append({"name": name, "section": key,
+                        "section_label": _label_for(key, lang, None),
                         "confidence": round(conf, 2), "lang": lang, "method": method})
     return {"results": results}
 
@@ -81,8 +119,15 @@ def recommend(req: RecommendRequest):
 
 @app.post("/v1/parse-recipe")
 def parse_recipe(req: ParseRecipeRequest):
+    """Fetch a recipe URL, extract ingredients, tag each with a section.
+
+    Anti-hallucination: LLM-extracted ingredients are validated against the
+    page source — items that don't appear verbatim are dropped. With custom
+    `sections`, ingredient tagging is delegated to a batched LLM call using
+    the supplied taxonomy.
+    """
     try:
-        return ai.parse_recipe(req.url, _cat).model_dump()
+        return ai.parse_recipe(req.url, _cat, sections=req.sections, lang=req.lang).model_dump()
     except Exception as e:
         raise HTTPException(502, f"fetch/parse failed: {e}")
 
