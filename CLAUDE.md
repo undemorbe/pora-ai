@@ -24,9 +24,14 @@ uvicorn main:app --port 8000 --reload
 
 # Offline check of deterministic logic (no LLM server needed, uses FastAPI TestClient):
 python smoke_test.py
+
+# Full unit/integration suite (LLM mocked via conftest fixtures):
+pytest                       # all tests
+pytest tests/test_brain.py   # one file
+pytest -k suggest            # filter by name
 ```
 
-No test framework, no linter configured. `smoke_test.py` is the only regression check — extend it when adding endpoints.
+`smoke_test.py` remains as the quick demo. The real regression check is the `tests/` suite — extend it when adding endpoints. LLM is never called for real in tests: `tests/conftest.py` provides `mock_chat`/`enable_llm` fixtures that monkey-patch `pora_llm._chat`.
 
 ## Env contract
 
@@ -43,16 +48,19 @@ Three layers, strict separation. Touching one usually means touching the others 
   - `Categorizer` — char-ngram TF-IDF + LogisticRegression, trained on bilingual RU/EN `TRAINING` dict, fit once in `main.py:_cat = brain.Categorizer().fit()` at import time.
   - `best_notify_hour` — evening-window-biased peak from hour histogram.
   - `recommend` — heuristic cuisine + pantry-overlap score over hardcoded `RECIPE_CATALOG`.
+  - `suggest_basket_fit` / `suggest_replenish` / `suggest_recipes` / `merge_suggestions` — hybrid recommendation engine behind `/v1/suggest`. All four return uniform `{type, product, recipe, reason, score, meta}` dicts. `merge_suggestions` dedupes by `(type, product, recipe)` (first occurrence wins) and sorts by score desc.
+  - `REASON_LABELS` — RU/EN reason strings for the four suggestion types (`basket_fit`, `replenish`, `recipe`, `dish`).
   - `SECTIONS` — canonical English keys (`dairy, produce, …`). Sections are KEYS, never localized text. `SECTION_LABELS` exists only as fallback for callers that don't localize themselves.
 
 - **`pora_llm.py`** — single multilingual LLM module. Imports `brain` (one-way: brain never imports LLM). OpenAI SDK client is lazy (`client()`), so importing the module never touches the network.
   - `detect_lang` — script-based (Cyrillic/CJK/diacritics), no deps.
   - `chat` flow: `guard_on_topic` regex blocklist runs BEFORE the LLM call; off-topic → localized refusal, no tokens spent.
   - `categorize_llm` / `extract_recipe_from_text` use OpenAI structured-output (`response_format=json_schema, strict=True`). Section enum mirrors `brain.SECTIONS`.
-  - `parse_recipe`: HTTP fetch → `extract_jsonld` (free path) → LLM fallback → quick classifier tags each ingredient with a section. Walks `@graph` and `@type` arrays for JSON-LD recipes.
+  - `parse_recipe`: HTTP fetch → `extract_jsonld` (free path) → LLM fallback over **stripped HTML text** (`html_to_text`) → `validate_against_source` drops any ingredient whose `raw`/`name` does not literally appear in the source (anti-hallucination guard) → quick classifier tags each ingredient with a section. Walks `@graph` and `@type` arrays for JSON-LD recipes. If LLM hallucinates everything, `source` flips back to `"none"` and ingredients are empty.
+  - `suggest_dish_llm` — JSON-schema-constrained LLM dish suggester used by `/v1/suggest` for the `dish` slot. Returns `None` when LLM disabled.
   - `REFUSALS` — 8 languages; unknown lang → English.
 
-- **`main.py`** — thin FastAPI endpoints. `/v1/categorize` is the only place where the routing rule lives: `lang ∈ {ru, en}` → fast classifier (and escalate to LLM only when `confidence < 0.45` AND LLM enabled), other languages → LLM directly. Keep that routing in `main.py`, not inside `brain` or `pora_llm`.
+- **`main.py`** — thin FastAPI endpoints. `/v1/categorize` is the only place where the routing rule lives: `lang ∈ {ru, en}` → fast classifier (and escalate to LLM only when `confidence < 0.45` AND LLM enabled), other languages → LLM directly. Keep that routing in `main.py`, not inside `brain` or `pora_llm`. `/v1/suggest` is the only endpoint that fuses multiple `brain.suggest_*` engines + an LLM dish slot through `brain.merge_suggestions` — keep the fusion glue here, suggestion engines stay pure in `brain.py`.
 
 - **`llm.py`** — deprecated shim, re-exports from `pora_llm`. Do not add new code here; do not delete (Go-side or older imports may reference it).
 
