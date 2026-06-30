@@ -1,0 +1,67 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Project
+
+Pora AI — stateless multilingual HTTP microservice (FastAPI) called by a Go backend. Data lives in Go; this service receives it per request. Same code runs against local Ollama or any OpenAI-compatible cloud — difference is env only.
+
+```
+Flutter → Go backend → Pora AI → LLM (Ollama OR OpenAI-compatible)
+```
+
+## Commands
+
+```bash
+# Full stack (service + Ollama):
+docker compose up -d
+docker compose exec ollama ollama pull qwen3   # one-time model pull
+# Docs: http://localhost:8000/docs
+
+# Local dev without Docker:
+pip install -r requirements.txt
+uvicorn main:app --port 8000 --reload
+
+# Offline check of deterministic logic (no LLM server needed, uses FastAPI TestClient):
+python smoke_test.py
+```
+
+No test framework, no linter configured. `smoke_test.py` is the only regression check — extend it when adding endpoints.
+
+## Env contract
+
+`LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL`. If `LLM_API_KEY` is empty, `llm_enabled()` returns `False` and every LLM path falls back gracefully (RU/EN fast classifier, JSON-LD for recipes, localized refusal for chat/tip). Never raise on missing key — preserve this graceful-degrade behavior.
+
+## Architecture
+
+Three layers, strict separation. Touching one usually means touching the others — keep the boundary clean.
+
+- **`schemas.py`** — Pydantic request contract. This is the Go ↔ Pora wire format. Changing a field name or making a field required is a breaking change for the Go client. `lang` is always optional: caller passes app locale OR service auto-detects via `pora_llm.detect_lang`.
+
+- **`brain.py`** — pure local logic (no network, no LLM):
+  - `predict_replenishment` — median interval per product, confidence from coefficient of variation, status bucketed (`overdue|due|soon|ok`). Needs ≥3 events per product.
+  - `Categorizer` — char-ngram TF-IDF + LogisticRegression, trained on bilingual RU/EN `TRAINING` dict, fit once in `main.py:_cat = brain.Categorizer().fit()` at import time.
+  - `best_notify_hour` — evening-window-biased peak from hour histogram.
+  - `recommend` — heuristic cuisine + pantry-overlap score over hardcoded `RECIPE_CATALOG`.
+  - `SECTIONS` — canonical English keys (`dairy, produce, …`). Sections are KEYS, never localized text. `SECTION_LABELS` exists only as fallback for callers that don't localize themselves.
+
+- **`pora_llm.py`** — single multilingual LLM module. Imports `brain` (one-way: brain never imports LLM). OpenAI SDK client is lazy (`client()`), so importing the module never touches the network.
+  - `detect_lang` — script-based (Cyrillic/CJK/diacritics), no deps.
+  - `chat` flow: `guard_on_topic` regex blocklist runs BEFORE the LLM call; off-topic → localized refusal, no tokens spent.
+  - `categorize_llm` / `extract_recipe_from_text` use OpenAI structured-output (`response_format=json_schema, strict=True`). Section enum mirrors `brain.SECTIONS`.
+  - `parse_recipe`: HTTP fetch → `extract_jsonld` (free path) → LLM fallback → quick classifier tags each ingredient with a section. Walks `@graph` and `@type` arrays for JSON-LD recipes.
+  - `REFUSALS` — 8 languages; unknown lang → English.
+
+- **`main.py`** — thin FastAPI endpoints. `/v1/categorize` is the only place where the routing rule lives: `lang ∈ {ru, en}` → fast classifier (and escalate to LLM only when `confidence < 0.45` AND LLM enabled), other languages → LLM directly. Keep that routing in `main.py`, not inside `brain` or `pora_llm`.
+
+- **`llm.py`** — deprecated shim, re-exports from `pora_llm`. Do not add new code here; do not delete (Go-side or older imports may reference it).
+
+- **`client_example.go`** — reference Go client. Update when the wire contract in `schemas.py` changes.
+
+## Conventions that aren't obvious
+
+- Section keys come from `brain.SECTIONS` — when adding a section, update both `brain.SECTIONS`, `brain.SECTION_LABELS` (ru + en), `brain.TRAINING` (or LLM-only sections won't classify), and the LLM enum is auto-derived.
+- Adding a refusal language: append to `pora_llm.REFUSALS` AND extend `detect_lang` heuristics, otherwise the language never resolves and falls back to English.
+- The off-topic `_OFFTOPIC` tuple is intentionally crude — it's a pre-LLM cost guard, not a security boundary. The real scope rule lives in `SCOPE_SYSTEM` prompt.
+- Module-level `_cat` in `main.py` is fit once at import; tests/scripts that import `main` pay that cost. `smoke_test.py` relies on this.
+- `_chat()` returns `None` when LLM disabled — every caller must handle `None` and fall back, never raise.

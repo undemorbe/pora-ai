@@ -1,0 +1,38 @@
+# Pora AI + локальная Ollama одной командой:  docker compose up -d
+# Затем один раз скачать модель:  docker compose exec ollama ollama pull qwen3
+#
+# Go-бэкенд ходит на http://pora-ai:8000 (или http://localhost:8000 снаружи).
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: pora-ollama
+    ports:
+      - "11434:11434"          # убери наружу в проде — оставь только внутри сети
+    volumes:
+      - ollama_models:/root/.ollama
+    # для GPU раскомментируй:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - capabilities: ["gpu"]
+
+  pora-ai:
+    build: .
+    container_name: pora-ai
+    ports:
+      - "8000:8000"
+    environment:
+      # локально через Ollama:
+      LLM_BASE_URL: "http://ollama:11434/v1"
+      LLM_API_KEY: "ollama"        # любой непустой
+      LLM_MODEL: "qwen3"           # или дообученная pora-chef
+      # для облака вместо трёх строк выше:
+      # LLM_BASE_URL: "https://api.openai.com/v1"
+      # LLM_API_KEY: "sk-..."
+      # LLM_MODEL: "gpt-4o-mini"
+    depends_on:
+      - ollama
+
+volumes:
+  ollama_models:
