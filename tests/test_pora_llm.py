@@ -17,17 +17,41 @@ class TestDetectLang:
     def test_ascii_default_en(self):
         assert ai.detect_lang("give me a recipe") == "en"
 
-    def test_cjk_is_zh(self):
+    def test_japanese_kana_beats_zh(self):
+        assert ai.detect_lang("レシピを教えて") == "ja"
+
+    def test_zh_pure_han(self):
         assert ai.detect_lang("给我一个食谱") == "zh"
 
     def test_hangul_is_ko(self):
         assert ai.detect_lang("레시피 주세요") == "ko"
 
-    def test_spanish_diacritics(self):
+    def test_arabic(self):
+        assert ai.detect_lang("أعطني وصفة") == "ar"
+
+    def test_hindi(self):
+        assert ai.detect_lang("मुझे एक रेसिपी दो") == "hi"
+
+    def test_hebrew(self):
+        assert ai.detect_lang("תן לי מתכון") == "he"
+
+    def test_polish_diacritics(self):
+        assert ai.detect_lang("zażółć gęślą jaźń") == "pl"
+
+    def test_turkish_diacritics(self):
+        assert ai.detect_lang("yoğurt ve çay") == "tr"
+
+    def test_portuguese_tilde(self):
+        assert ai.detect_lang("pão e leite, açúcar") == "pt"
+
+    def test_spanish_inverted_marks(self):
         assert ai.detect_lang("¿qué receta?") == "es"
 
+    def test_french_oe_ligature(self):
+        assert ai.detect_lang("œufs et beurre français") == "fr"
+
     def test_german_umlaut(self):
-        assert ai.detect_lang("Brötchen") == "de"
+        assert ai.detect_lang("Brötchen mit Süß") == "de"
 
     def test_default_overrideable(self):
         assert ai.detect_lang("xyz", default="zh") == "zh"
@@ -43,6 +67,15 @@ class TestRefusal:
 
     def test_unknown_lang_falls_back_to_en(self):
         assert ai.refusal("xx") == ai.refusal("en")
+
+    def test_15_languages_covered(self):
+        expected = {"ru", "en", "es", "pt", "de", "fr", "it", "pl", "tr",
+                    "zh", "ja", "ko", "ar", "hi", "he"}
+        assert expected <= set(ai.REFUSALS), f"missing: {expected - set(ai.REFUSALS)}"
+
+    def test_all_have_emoji(self):
+        for code, text in ai.REFUSALS.items():
+            assert "🙂" in text, f"{code} has no emoji"
 
 
 # --------------------------------------------------------------------------

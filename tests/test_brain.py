@@ -84,16 +84,31 @@ class TestCategorizer:
 
     @pytest.mark.parametrize("name,section", [
         ("молоко", "dairy"), ("кефир", "dairy"), ("milk", "dairy"),
+        ("моцарелла", "dairy"), ("mozzarella", "dairy"),
         ("банан", "produce"), ("avocado", "produce"),
+        ("шпинат", "produce"), ("spinach", "produce"),
         ("хлеб", "bakery"), ("baguette", "bakery"),
         ("курица", "meat_fish"), ("chicken", "meat_fish"),
+        ("лосось", "meat_fish"), ("salmon", "meat_fish"),
+        ("креветки", "meat_fish"), ("shrimp", "meat_fish"),
         ("вода", "drinks"), ("juice", "drinks"),
+        ("вино", "drinks"), ("wine", "drinks"),
         ("рис", "pantry"), ("rice", "pantry"),
+        ("оливковое масло", "pantry"), ("olive oil", "pantry"),
     ])
     def test_known_items_classified_correctly(self, cat, name, section):
         key, conf = cat.predict(name)
         assert key == section
         assert 0.0 <= conf <= 1.0
+
+    def test_predict_batch_aligned_to_input(self, cat):
+        names = ["молоко", "banana", "wine"]
+        out = cat.predict_batch(names)
+        assert len(out) == len(names)
+        assert [k for k, _ in out] == ["dairy", "produce", "drinks"]
+
+    def test_predict_batch_empty(self, cat):
+        assert cat.predict_batch([]) == []
 
 
 # --------------------------------------------------------------------------

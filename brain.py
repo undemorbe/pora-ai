@@ -66,42 +66,132 @@ def predict_replenishment(purchases: list[dict], today: dt.date, min_events: int
 # 2. КАТЕГОРИЗАТОР — быстрый, мультиязычный (RU + EN), выдаёт КЛЮЧ раздела
 #    Для остальных языков main делегирует в LLM (ai.categorize_llm).
 # ============================================================
-TRAINING = {
-    "dairy": ["молоко", "кефир", "йогурт", "творог", "сметана", "сыр", "сливки",
-              "milk", "kefir", "yogurt", "curd", "sour cream", "cheese", "cream", "butter"],
-    "produce": ["бананы", "помидоры", "огурцы", "авокадо", "яблоки", "брокколи", "лимон", "картофель", "лук", "морковь",
-                "banana", "tomato", "cucumber", "avocado", "apple", "broccoli", "lemon", "potato", "onion", "carrot"],
-    "bakery": ["хлеб", "багет", "булочки", "лаваш", "батон", "круассан",
-               "bread", "baguette", "bun", "loaf", "croissant", "roll"],
-    "pantry": ["паста", "спагетти", "рис", "гречка", "мука", "сахар", "соль", "кофе", "макароны",
-               "pasta", "spaghetti", "rice", "flour", "sugar", "salt", "coffee", "tea", "noodles", "oil"],
-    "drinks": ["вода", "минералка", "сок", "чай", "лимонад", "газировка", "морс",
-               "water", "juice", "soda", "lemonade", "sparkling water"],
-    "meat_fish": ["курица", "куриное филе", "фарш", "говядина", "лосось", "креветки", "бекон", "колбаса",
-                  "chicken", "beef", "mince", "salmon", "shrimp", "bacon", "sausage", "fish"],
+TRAINING: dict[str, list[str]] = {
+    "dairy": [
+        # ru
+        "молоко", "молоко безлактозное", "кефир", "ряженка", "айран",
+        "йогурт", "греческий йогурт", "творог", "творожок", "сметана",
+        "сыр", "твёрдый сыр", "плавленый сыр", "моцарелла", "пармезан",
+        "фета", "брынза", "рикотта", "маскарпоне", "сливки", "сливочное масло",
+        "масло сливочное", "сгущёнка", "сгущённое молоко",
+        # en
+        "milk", "lactose-free milk", "kefir", "buttermilk", "yogurt",
+        "greek yogurt", "curd", "cottage cheese", "sour cream", "cheese",
+        "hard cheese", "processed cheese", "mozzarella", "parmesan", "feta",
+        "ricotta", "mascarpone", "cream", "heavy cream", "whipping cream",
+        "butter", "condensed milk", "ghee",
+    ],
+    "produce": [
+        # ru — frequent grocery items
+        "бананы", "помидоры", "томаты", "огурцы", "авокадо", "яблоки",
+        "груши", "виноград", "брокколи", "цветная капуста", "капуста",
+        "лимон", "лайм", "апельсины", "мандарины", "картофель", "лук",
+        "лук репчатый", "лук зелёный", "морковь", "свёкла", "редис",
+        "перец", "перец болгарский", "чеснок", "имбирь", "грибы",
+        "шампиньоны", "зелень", "укроп", "петрушка", "базилик", "руккола",
+        "шпинат", "салат", "клубника", "малина", "черника",
+        # en
+        "banana", "tomato", "cherry tomato", "cucumber", "avocado",
+        "apple", "pear", "grapes", "broccoli", "cauliflower", "cabbage",
+        "lemon", "lime", "orange", "mandarin", "potato", "sweet potato",
+        "onion", "red onion", "green onion", "scallion", "carrot",
+        "beetroot", "radish", "bell pepper", "garlic", "ginger",
+        "mushroom", "champignon", "herbs", "dill", "parsley", "basil",
+        "arugula", "spinach", "salad", "lettuce", "strawberry",
+        "raspberry", "blueberry",
+    ],
+    "bakery": [
+        "хлеб", "хлеб ржаной", "хлеб бородинский", "багет", "булочки",
+        "лаваш", "тортилья", "батон", "круассан", "сдоба", "пирожки",
+        "печенье", "пряники", "вафли", "пита", "фокачча",
+        "bread", "rye bread", "sourdough", "baguette", "bun", "burger bun",
+        "loaf", "croissant", "roll", "pastry", "cookies", "biscuits",
+        "waffles", "pita", "focaccia", "tortilla",
+    ],
+    "pantry": [
+        "паста", "спагетти", "пенне", "лазанья листы", "рис", "рис басмати",
+        "гречка", "перловка", "овсянка", "мука", "сахар", "соль", "кофе",
+        "кофе молотый", "чай", "чай зелёный", "макароны", "лапша",
+        "оливковое масло", "подсолнечное масло", "уксус", "соевый соус",
+        "томатная паста", "консервы", "тунец консервированный", "фасоль",
+        "горох", "чечевица", "крупа", "мёд", "варенье", "джем",
+        "шоколад", "какао", "специи", "приправы",
+        "pasta", "spaghetti", "penne", "lasagna sheets", "rice",
+        "basmati rice", "buckwheat", "oats", "oatmeal", "flour", "sugar",
+        "brown sugar", "salt", "coffee", "ground coffee", "tea",
+        "green tea", "noodles", "olive oil", "sunflower oil", "vegetable oil",
+        "vinegar", "soy sauce", "tomato paste", "canned beans", "canned tuna",
+        "beans", "peas", "lentils", "honey", "jam", "chocolate", "cocoa",
+        "spices", "seasoning",
+    ],
+    "drinks": [
+        "вода", "минералка", "минеральная вода", "сок", "сок апельсиновый",
+        "сок яблочный", "чай холодный", "лимонад", "газировка", "кола",
+        "морс", "квас", "компот", "пиво", "вино", "вино красное",
+        "вино белое", "шампанское", "энергетик",
+        "water", "still water", "sparkling water", "mineral water",
+        "juice", "orange juice", "apple juice", "iced tea", "lemonade",
+        "soda", "cola", "kombucha", "beer", "wine", "red wine",
+        "white wine", "champagne", "energy drink",
+    ],
+    "meat_fish": [
+        "курица", "куриное филе", "куриные грудки", "куриные крылья",
+        "куриные бёдра", "фарш", "фарш говяжий", "фарш куриный",
+        "говядина", "говядина вырезка", "свинина", "свинина шейка",
+        "стейк", "рёбрышки", "баранина", "индейка", "утка", "лосось",
+        "сёмга", "форель", "тунец", "креветки", "мидии", "осьминог",
+        "кальмар", "бекон", "ветчина", "колбаса", "сосиски", "пельмени",
+        "котлеты",
+        "chicken", "chicken breast", "chicken thigh", "chicken wing",
+        "ground chicken", "mince", "ground beef", "beef", "beef tenderloin",
+        "pork", "pork shoulder", "steak", "ribs", "lamb", "turkey", "duck",
+        "salmon", "trout", "tuna", "shrimp", "prawn", "mussels", "octopus",
+        "squid", "bacon", "ham", "sausage", "hot dog", "fish", "cod",
+    ],
 }
 
 
 class Categorizer:
+    """Character-ngram TF-IDF + LogisticRegression over bilingual RU/EN TRAINING.
+
+    Wider ngram range (2..5) catches longer compound names; saga-cap on
+    max_iter and slightly higher regularization improve generalization for
+    short product names. Predictions are calibrated only by `predict_proba`'s
+    raw output — no extra calibration pass.
+    """
+
     def __init__(self):
         self.pipe = make_pipeline(
-            TfidfVectorizer(analyzer="char_wb", ngram_range=(2, 4)),
-            LogisticRegression(max_iter=1000, C=8.0),
+            TfidfVectorizer(analyzer="char_wb", ngram_range=(2, 5),
+                            min_df=1, sublinear_tf=True),
+            LogisticRegression(max_iter=2000, C=4.0, class_weight="balanced"),
         )
 
     def fit(self):
         X, y = [], []
         for key, names in TRAINING.items():
             for n in names:
-                X.append(n.lower())
+                X.append(n.lower().strip())
                 y.append(key)
         self.pipe.fit(X, y)
         return self
 
     def predict(self, name: str) -> tuple[str, float]:
-        proba = self.pipe.predict_proba([name.lower()])[0]
+        proba = self.pipe.predict_proba([name.lower().strip()])[0]
         i = int(np.argmax(proba))
         return self.pipe.classes_[i], float(proba[i])
+
+    def predict_batch(self, names: list[str]) -> list[tuple[str, float]]:
+        """Vectorized batch prediction — single fit() reuse, no per-call retraining."""
+        if not names:
+            return []
+        clean = [n.lower().strip() for n in names]
+        probs = self.pipe.predict_proba(clean)
+        out = []
+        for row in probs:
+            i = int(np.argmax(row))
+            out.append((self.pipe.classes_[i], float(row[i])))
+        return out
 
 
 # ============================================================
