@@ -166,6 +166,32 @@ def categorize_llm(name: str) -> tuple[str, float]:
         return "other", 0.0
 
 
+# ---- LLM-предложение блюда (для /v1/suggest, dish-тип) ----
+_DISH_SCHEMA = {
+    "type": "object", "additionalProperties": False, "required": ["dish", "reason"],
+    "properties": {"dish": {"type": "string"}, "reason": {"type": "string"}},
+}
+
+
+def suggest_dish_llm(top_cuisine: str, frequent: list[str], lang: str = "en") -> Optional[dict]:
+    """LLM-generated dish suggestion. Returns {dish, reason} or None if LLM disabled/failed."""
+    system = ("You are Pora's cooking assistant. Suggest ONE specific dish name (real dish, "
+              "no invented food) the user could cook from their preferences. "
+              f"Answer fields STRICTLY in language code '{lang}'. Return JSON per schema, no prose.")
+    user = f"Favourite cuisine: {top_cuisine or 'n/a'}. Often buys: {', '.join(frequent) or 'n/a'}."
+    out = _chat(system, user, temperature=0.7,
+                response_format={"type": "json_schema",
+                                 "json_schema": {"name": "dish", "strict": True, "schema": _DISH_SCHEMA}})
+    if not out:
+        return None
+    try:
+        data = json.loads(_strip_fences(out))
+        return {"dish": str(data.get("dish") or "").strip(),
+                "reason": str(data.get("reason") or "").strip()}
+    except Exception:
+        return None
+
+
 # ---- совет по вкусу (мультиязычно) ----
 def generate_tip(top_cuisine: str, frequent: list[str], lang: str = "en") -> dict:
     system = ("You are Pora's friendly cooking assistant. Give ONE short tip (1-2 sentences): "
@@ -208,6 +234,48 @@ _RECIPE_SCHEMA = {
 }
 
 
+# --------------------------------------------------------------------------
+# HTML utils + anti-hallucination validation
+# --------------------------------------------------------------------------
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+_SCRIPT_STYLE_RE = re.compile(r"<(script|style|noscript)[^>]*>.*?</\1>", re.S | re.I)
+_WS_RE = re.compile(r"\s+")
+_HTML_ENTITIES = {"&amp;": "&", "&lt;": "<", "&gt;": ">", "&quot;": '"',
+                  "&#39;": "'", "&apos;": "'", "&nbsp;": " "}
+
+
+def html_to_text(html: str) -> str:
+    """Strip <script>/<style>, tags, decode common entities, collapse whitespace."""
+    s = _SCRIPT_STYLE_RE.sub(" ", html)
+    s = _HTML_TAG_RE.sub(" ", s)
+    for k, v in _HTML_ENTITIES.items():
+        s = s.replace(k, v)
+    return _WS_RE.sub(" ", s).strip()
+
+
+def _norm(s: str) -> str:
+    return _WS_RE.sub(" ", s.lower()).strip()
+
+
+def validate_against_source(ingredients: list[dict], source_text: str) -> list[dict]:
+    """Drop ingredients whose `raw` or `name` is not present in the source.
+
+    Anti-hallucination guard: LLM may invent ingredients that aren't in the page.
+    We require either the full `raw` line OR a sufficiently long `name` to appear
+    verbatim (case-insensitive, whitespace-collapsed) in the source text.
+    """
+    haystack = _norm(source_text)
+    kept = []
+    for ing in ingredients:
+        raw = _norm(ing.get("raw") or "")
+        name = _norm(ing.get("name") or "")
+        if raw and raw in haystack:
+            kept.append(ing)
+        elif name and len(name) >= 3 and name in haystack:
+            kept.append(ing)
+    return kept
+
+
 def _iter_recipe_nodes(data):
     stack = [data]
     while stack:
@@ -240,11 +308,24 @@ def extract_jsonld(html: str) -> Optional[dict]:
     return None
 
 
+_RECIPE_EXTRACT_SYSTEM = (
+    "You extract recipe ingredients from page text. "
+    "STRICT RULES:\n"
+    "1. ONLY use ingredients that literally appear in the text. NEVER invent, infer, "
+    "translate, complete or substitute. If unsure, omit.\n"
+    "2. Each `raw` MUST be a verbatim substring of the input text.\n"
+    "3. `name` is the canonical food noun (no qty/unit/adjectives).\n"
+    "4. Split numeric qty and unit when present in the same line. Otherwise null.\n"
+    "5. If the text is not a recipe or contains no ingredient list, return "
+    '{"title": null, "ingredients": []}.\n'
+    "6. Output: STRICT JSON per the provided schema, no prose, no code fences."
+)
+
+
 def extract_recipe_from_text(text: str) -> dict:
+    """LLM-based extraction with anti-hallucination validation against source text."""
     out = _chat(
-        "Extract recipe ingredients from the text. Return STRICT JSON per schema, no prose. "
-        'Split qty/unit/name. If not a recipe, return {"title": null, "ingredients": []}.',
-        text[:8000], temperature=0,
+        _RECIPE_EXTRACT_SYSTEM, text[:8000], temperature=0,
         response_format={"type": "json_schema",
                          "json_schema": {"name": "recipe", "strict": True, "schema": _RECIPE_SCHEMA}},
     )
@@ -252,17 +333,21 @@ def extract_recipe_from_text(text: str) -> dict:
         return {"title": None, "ingredients": [], "source": "none"}
     try:
         data = json.loads(_strip_fences(out))
-        data["source"] = "llm"
-        return data
     except Exception:
         return {"title": None, "ingredients": [], "source": "none"}
+    data["ingredients"] = validate_against_source(data.get("ingredients") or [], text)
+    data["source"] = "llm" if data["ingredients"] else "none"
+    return data
 
 
 def parse_recipe(url: str, categorizer: brain.Categorizer) -> Recipe:
-    """Полный разбор по ссылке: fetch → JSON-LD → (LLM) → проставить раздел каждому."""
+    """Полный разбор по ссылке: fetch → JSON-LD → LLM (валидированный) → раздел каждому."""
     html = httpx.get(url, timeout=20, follow_redirects=True, headers={"User-Agent": "PoraBot/1.0"}).text
-    data = extract_jsonld(html) or extract_recipe_from_text(html)
-    # проставляем раздел каждому ингредиенту быстрым классификатором
+    data = extract_jsonld(html)
+    if not data:
+        # для LLM-фолбэка кормим очищенный текст (без скриптов/тегов) — меньше шума, дешевле
+        text = html_to_text(html)
+        data = extract_recipe_from_text(text)
     for ing in data.get("ingredients", []):
         label = ing.get("name") or ing.get("raw") or ""
         ing["section"] = categorizer.predict(label)[0] if label else "other"
