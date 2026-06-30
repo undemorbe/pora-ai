@@ -14,7 +14,7 @@ import brain
 import pora_llm as ai
 from schemas import (
     BriefRequest, CategorizeRequest, ChatRequest, NotifyTimeRequest,
-    ParseRecipeRequest, RecommendRequest, ReplenishmentRequest, TipRequest,
+    ParseRecipeRequest, RecommendRequest, ReplenishmentRequest, SuggestRequest, TipRequest,
 )
 
 app = FastAPI(title="Pora AI", version="2.0.0",
@@ -97,6 +97,38 @@ def tip(req: TipRequest):
 def chat(req: ChatRequest):
     """Заскоупленный мультиязычный ассистент (кулинарные советы)."""
     return ai.chat(req.message, req.lang)
+
+
+@app.post("/v1/suggest")
+def suggest(req: SuggestRequest):
+    """Гибридные советы: «подходит к корзине», «скоро закончится», рецепты, блюдо от LLM.
+
+    Объединяет статистику покупок (пополнение), историю парсинга рецептов
+    (предпочтения по кухне), регулярные покупки (что обычно нужно) и текущую
+    корзину. Возвращает отсортированный по `score` список разнотипных подсказок.
+    """
+    today = dt.date.fromisoformat(req.today) if req.today else dt.date.today()
+    lang = req.lang or "en"
+
+    basket = brain.suggest_basket_fit(req.current_cart, req.regular_products,
+                                      req.recipe_imports, lang)
+    replenish = brain.suggest_replenish(_parse_dates(req.purchases), today, lang) if req.purchases else []
+    recipes = brain.suggest_recipes(req.recipe_imports, req.regular_products, lang)
+
+    dish_list: list[dict] = []
+    if ai.llm_enabled():
+        rec = brain.recommend(req.recipe_imports, req.regular_products)
+        dish = ai.suggest_dish_llm(rec["top_cuisine"], req.regular_products, lang)
+        if dish and dish.get("dish"):
+            dish_list = [{
+                "type": "dish", "product": None, "recipe": dish["dish"],
+                "reason": dish.get("reason") or brain.reason_label("dish", lang),
+                "score": 0.5,
+                "meta": {"top_cuisine": rec["top_cuisine"], "source": "llm"},
+            }]
+
+    merged = brain.merge_suggestions(basket, replenish, recipes, dish_list, limit=req.limit)
+    return {"lang": lang, "today": today.isoformat(), "suggestions": merged}
 
 
 @app.post("/v1/brief")

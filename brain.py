@@ -130,9 +130,17 @@ RECIPE_CATALOG = [
 ]
 
 
+def _first_token(s: str) -> str:
+    return s.lower().split()[0] if s and s.strip() else ""
+
+
+def _tokens(items: list[str]) -> set[str]:
+    return {_first_token(p) for p in items if p and p.strip()}
+
+
 def recommend(recipe_imports: list[str], regular_products: list[str]) -> dict:
     tried = set(recipe_imports)
-    regular = {p.lower().split()[0] for p in regular_products if p}
+    regular = _tokens(regular_products)
     cats = [r["cuisine"] for r in RECIPE_CATALOG if r["name"] in tried]
     top_cuisine = Counter(cats).most_common(1)[0][0] if cats else "Итальянская"
 
@@ -149,3 +157,117 @@ def recommend(recipe_imports: list[str], regular_products: list[str]) -> dict:
     match = len(best["ingredients"] & regular) / len(best["ingredients"])
     return {"top_cuisine": top_cuisine, "recipe": best["name"],
             "cuisine": best["cuisine"], "pantry_match": round(match, 2)}
+
+
+# ============================================================
+# 5. SUGGEST — гибридный движок советов (корзина + пополнение + рецепты)
+#    Тип suggestion: basket_fit | replenish | recipe | dish
+# ============================================================
+REASON_LABELS = {
+    "ru": {"basket_fit": "Подходит к корзине!", "replenish": "Скоро закончится — пора пополнить",
+           "recipe": "Подойдёт под ваш вкус", "dish": "Попробуйте новое блюдо"},
+    "en": {"basket_fit": "Pairs with your cart!", "replenish": "Running low — restock soon",
+           "recipe": "Matches your taste", "dish": "Try a new dish"},
+}
+
+
+def reason_label(kind: str, lang: str = "en") -> str:
+    return REASON_LABELS.get(lang, REASON_LABELS["en"]).get(kind, kind)
+
+
+def suggest_replenish(purchases: list[dict], today: dt.date, lang: str = "en",
+                      max_items: int = 3) -> list[dict]:
+    """Top urgent replenishments. Reuses predict_replenishment, keeps only overdue/due/soon."""
+    preds = predict_replenishment(purchases, today)
+    urgent = [p for p in preds if p["status"] in ("overdue", "due", "soon")]
+    out = []
+    for p in urgent[:max_items]:
+        urgency = {"overdue": 1.0, "due": 0.8, "soon": 0.6}[p["status"]]
+        out.append({
+            "type": "replenish", "product": p["product"], "recipe": None,
+            "reason": reason_label("replenish", lang),
+            "score": round(urgency * p["confidence"], 2),
+            "meta": {"status": p["status"], "days_left": p["days_left"],
+                     "due_date": p["due_date"], "every_days": p["every_days"]},
+        })
+    return out
+
+
+def suggest_basket_fit(current_cart: list[str], regular_products: list[str],
+                       recipe_imports: list[str], lang: str = "en",
+                       max_items: int = 3) -> list[dict]:
+    """For each cart item, find a recipe that uses it and suggest a missing ingredient
+    that the user regularly buys (= they'll actually need it)."""
+    if not current_cart:
+        return []
+    cart_tokens = _tokens(current_cart)
+    regular = _tokens(regular_products)
+    tried = set(recipe_imports)
+
+    out: list[dict] = []
+    seen_products: set[str] = set()
+    for recipe in RECIPE_CATALOG:
+        overlap_cart = recipe["ingredients"] & cart_tokens
+        if not overlap_cart:
+            continue
+        missing = recipe["ingredients"] - cart_tokens
+        for product in sorted(missing, key=lambda x: (x not in regular, x)):
+            if product in seen_products:
+                continue
+            seen_products.add(product)
+            in_regular = product in regular
+            recipe_bonus = 0.2 if recipe["name"] not in tried else 0.0
+            out.append({
+                "type": "basket_fit", "product": product, "recipe": recipe["name"],
+                "reason": reason_label("basket_fit", lang),
+                "score": round(0.6 + (0.3 if in_regular else 0.0) + recipe_bonus, 2),
+                "meta": {"matched_cart_item": next(iter(overlap_cart)),
+                         "cuisine": recipe["cuisine"], "in_regular": in_regular},
+            })
+            if len(out) >= max_items:
+                return out
+    return out
+
+
+def suggest_recipes(recipe_imports: list[str], regular_products: list[str],
+                    lang: str = "en", max_items: int = 2) -> list[dict]:
+    """Rank catalog recipes by cuisine affinity + pantry overlap, exclude already-tried."""
+    tried = set(recipe_imports)
+    regular = _tokens(regular_products)
+    cats = [r["cuisine"] for r in RECIPE_CATALOG if r["name"] in tried]
+    top_cuisine = Counter(cats).most_common(1)[0][0] if cats else None
+
+    ranked = []
+    for r in RECIPE_CATALOG:
+        if r["name"] in tried:
+            continue
+        match = len(r["ingredients"] & regular) / len(r["ingredients"])
+        bonus = 0.3 if top_cuisine and r["cuisine"] == top_cuisine else 0.0
+        ranked.append((round(match + bonus, 2), r, match))
+    ranked.sort(key=lambda x: -x[0])
+
+    out = []
+    for score, r, match in ranked[:max_items]:
+        out.append({
+            "type": "recipe", "product": None, "recipe": r["name"],
+            "reason": reason_label("recipe", lang),
+            "score": score,
+            "meta": {"cuisine": r["cuisine"], "pantry_match": round(match, 2),
+                     "missing": sorted(r["ingredients"] - regular)},
+        })
+    return out
+
+
+def merge_suggestions(*groups: list[dict], limit: int = 5) -> list[dict]:
+    """Flatten + sort by score desc, drop duplicates by (type, product, recipe)."""
+    seen: set[tuple] = set()
+    flat: list[dict] = []
+    for g in groups:
+        for s in g:
+            key = (s["type"], s.get("product"), s.get("recipe"))
+            if key in seen:
+                continue
+            seen.add(key)
+            flat.append(s)
+    flat.sort(key=lambda s: -s["score"])
+    return flat[:limit]

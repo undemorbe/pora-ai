@@ -55,3 +55,14 @@ class BriefRequest(BaseModel):
     recipe_imports: list[str] = Field(default_factory=list)
     regular_products: list[str] = Field(default_factory=list)
     lang: Optional[str] = None
+
+
+class SuggestRequest(BaseModel):
+    today: Optional[str] = None
+    purchases: list[Purchase] = Field(default_factory=list)
+    recipe_imports: list[str] = Field(default_factory=list)
+    regular_products: list[str] = Field(default_factory=list)
+    current_cart: list[str] = Field(default_factory=list,
+                                    description="Items already in the user's cart right now")
+    lang: Optional[str] = None
+    limit: int = Field(5, ge=1, le=20)
