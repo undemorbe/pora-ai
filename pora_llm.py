@@ -19,7 +19,7 @@ import re
 from typing import Optional
 
 import httpx
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field
 
 import brain
 
