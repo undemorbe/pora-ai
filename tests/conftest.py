@@ -19,6 +19,22 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 
+@pytest.fixture(autouse=True)
+def _clear_pora_caches():
+    """Reset in-process caches before/after every test.
+
+    Without this, an earlier test that cached ('cat', 'молоко', ...) → ('dairy', 0.9)
+    can silently satisfy a later test that expects the fallback path — a category
+    of leakage that is easy to miss and hard to debug.
+    """
+    import pora_llm
+    pora_llm._categorize_cache.clear()
+    pora_llm._recipe_cache.clear()
+    yield
+    pora_llm._categorize_cache.clear()
+    pora_llm._recipe_cache.clear()
+
+
 @pytest.fixture
 def client():
     """FastAPI TestClient. Importing `main` triggers Categorizer.fit() once."""

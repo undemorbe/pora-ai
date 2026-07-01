@@ -627,3 +627,93 @@ class TestGenerateTip:
         out = ai.generate_tip("Итальянская", ["паста"], "ru")
         assert out["source"] == "llm"
         assert "оссобуко" in out["tip"]
+
+
+class TestCategorizeCacheWiring:
+    @pytest.fixture(autouse=True)
+    def _clear(self):
+        import pora_llm
+        pora_llm._categorize_cache.clear()
+        yield
+        pora_llm._categorize_cache.clear()
+
+    def test_second_call_hits_cache_and_skips_llm(self, mock_chat):
+        calls = {"n": 0}
+
+        def responder(system, user, **kw):
+            calls["n"] += 1
+            return '{"section": "dairy"}'
+
+        mock_chat(responder)
+        ai.categorize_llm("молоко")
+        ai.categorize_llm("молоко")
+        assert calls["n"] == 1
+
+    def test_batch_partial_cache_hit_only_misses_reach_llm(self, mock_chat):
+        # Prime cache with молоко → dairy
+        mock_chat('{"section": "dairy"}')
+        ai.categorize_llm("молоко")
+
+        # Batch call for [молоко, чай] — only чай should be sent
+        seen = {"names": None}
+
+        def responder(system, user, **kw):
+            seen["names"] = user
+            return '{"results": [{"name": "чай", "section": "drinks"}]}'
+
+        mock_chat(responder)
+        out = ai.categorize_llm_batch(["молоко", "чай"])
+        assert out == [("dairy", 0.9), ("drinks", 0.9)]
+        assert "чай" in seen["names"]
+        assert "молоко" not in seen["names"]
+
+    def test_custom_sections_have_separate_cache_key(self, mock_chat):
+        mock_chat(['{"section": "dairy"}', '{"section": "other"}'])
+        r1 = ai.categorize_llm("молоко")                     # default sections
+        r2 = ai.categorize_llm("молоко", sections=["a", "b", "other"])
+        assert r1 != r2                                       # both missed
+
+
+class TestRecipeCacheWiring:
+    @pytest.fixture(autouse=True)
+    def _clear(self):
+        import pora_llm
+        pora_llm._recipe_cache.clear()
+        yield
+        pora_llm._recipe_cache.clear()
+
+    def test_second_call_skips_web_fetch(self, monkeypatch):
+        import pora_llm
+        html = '<html><script type="application/ld+json">{"@type":"Recipe","name":"X","recipeIngredient":["a"]}</script></html>'
+        calls = {"n": 0}
+
+        def fake_fetch(url, *a, **kw):
+            calls["n"] += 1
+            return {"url": url, "status": 200, "html": html,
+                    "text": pora_llm.html_to_text(pora_llm.extract_main_content(html))}
+
+        monkeypatch.setattr(pora_llm, "web_fetch", fake_fetch)
+        import brain
+        cat = brain.Categorizer().fit()
+        r1 = ai.parse_recipe("http://example.com/x", cat)
+        r2 = ai.parse_recipe("http://example.com/x", cat)
+        assert calls["n"] == 1
+        assert r1.title == r2.title
+
+
+class TestCacheDisabledByEnv:
+    def test_disabled_bypasses_all_lookups(self, monkeypatch, mock_chat):
+        import pora_llm
+        pora_llm._categorize_cache.clear()
+        monkeypatch.setattr(pora_llm, "_CACHE_ENABLED", False)
+        calls = {"n": 0}
+
+        def responder(system, user, **kw):
+            calls["n"] += 1
+            return '{"section": "dairy"}'
+
+        mock_chat(responder)
+        ai.categorize_llm("молоко")
+        ai.categorize_llm("молоко")
+        assert calls["n"] == 2
+        pora_llm._categorize_cache.clear()

@@ -25,6 +25,7 @@ from pydantic import BaseModel, Field
 
 import brain
 import constants as C
+from _cache import TTLCache
 
 # --------------------------------------------------------------------------
 # Конфиг + ленивый клиент (не трогаем сеть на импорте)
@@ -34,6 +35,21 @@ API_KEY = os.getenv("LLM_API_KEY", "")
 MODEL = os.getenv("LLM_MODEL", "qwen3")
 
 _client = None
+
+
+# --------------------------------------------------------------------------
+# In-process caches — categorize (per name+sections) and parse_recipe (per URL)
+# --------------------------------------------------------------------------
+def _cache_enabled_from_env() -> bool:
+    raw = os.getenv(C.CACHE_ENABLED_ENV)
+    if raw is None:
+        return C.CACHE_ENABLED_DEFAULT
+    return raw.strip() not in ("0", "false", "False", "no", "NO")
+
+
+_CACHE_ENABLED = _cache_enabled_from_env()
+_categorize_cache = TTLCache(C.CATEGORIZE_CACHE_SIZE, C.CATEGORIZE_CACHE_TTL_S)
+_recipe_cache = TTLCache(C.RECIPE_CACHE_SIZE, C.RECIPE_CACHE_TTL_S)
 
 
 def llm_enabled() -> bool:
@@ -209,6 +225,11 @@ def _sections_or_default(sections: Optional[list[str]]) -> list[str]:
 def categorize_llm(name: str, sections: Optional[list[str]] = None) -> tuple[str, float]:
     """Section for a grocery name in ANY language and ANY caller-supplied taxonomy."""
     sections = _sections_or_default(sections)
+    key = ("cat", name.lower().strip(), tuple(sorted(sections)))
+    if _CACHE_ENABLED:
+        cached = _categorize_cache.get(key)
+        if cached is not None:
+            return cached
     out = _chat(
         f"{C.CATEGORIZE_SYSTEM}\nAllowed keys: {', '.join(sections)}.",
         name, temperature=C.TEMPERATURE_STRICT,
@@ -218,42 +239,64 @@ def categorize_llm(name: str, sections: Optional[list[str]] = None) -> tuple[str
     )
     data = _safe_json_load(out)
     if not data or "section" not in data:
-        return _fallback_section(sections), C.LLM_CONF_LOW
-    return data["section"], C.LLM_CONF_HIGH
+        result = (_fallback_section(sections), C.LLM_CONF_LOW)
+    else:
+        result = (data["section"], C.LLM_CONF_HIGH)
+    if _CACHE_ENABLED and result[1] == C.LLM_CONF_HIGH:
+        _categorize_cache.set(key, result)
+    return result
 
 
 def categorize_llm_batch(names: list[str], sections: Optional[list[str]] = None) -> list[tuple[str, float]]:
-    """Batched LLM categorization — one call for N items, saves tokens vs per-item calls.
+    """Batched LLM categorization with per-item cache hits.
 
-    Returns a list aligned with ``names``. Missing/failed items get the fallback section
-    (``other`` if present, else the first section) at confidence 0.0.
+    Cache is consulted per-name before any LLM call. Only misses go to the LLM
+    (one batched call). Fresh results are written back to cache individually.
     """
     if not names:
         return []
     sections = _sections_or_default(sections)
     fallback = _fallback_section(sections)
-    out = _chat(
-        f"{C.CATEGORIZE_SYSTEM}\nAllowed keys: {', '.join(sections)}. "
-        "Classify EVERY item in the input array. "
-        "For each item return the name verbatim and one section key.",
-        json.dumps(names, ensure_ascii=False), temperature=C.TEMPERATURE_STRICT,
-        response_format={"type": "json_schema",
-                         "json_schema": {"name": "sections", "strict": True,
-                                         "schema": _section_batch_schema(sections)}},
-    )
-    data = _safe_json_load(out)
-    if not data:
-        return [(fallback, C.LLM_CONF_LOW)] * len(names)
-    by_name = {str(r.get("name") or ""): r.get("section")
-               for r in (data.get("results") or [])}
-    result: list[tuple[str, float]] = []
-    for n in names:
-        sec = by_name.get(n)
-        if sec in sections:
-            result.append((sec, C.LLM_CONF_HIGH))
+    sections_key = tuple(sorted(sections))
+
+    results: list[Optional[tuple[str, float]]] = [None] * len(names)
+    misses: list[tuple[int, str]] = []
+
+    for i, n in enumerate(names):
+        key = ("cat", n.lower().strip(), sections_key)
+        cached = _categorize_cache.get(key) if _CACHE_ENABLED else None
+        if cached is not None:
+            results[i] = cached
         else:
-            result.append((fallback, C.LLM_CONF_LOW))
-    return result
+            misses.append((i, n))
+
+    if misses:
+        miss_names = [n for _, n in misses]
+        out = _chat(
+            f"{C.CATEGORIZE_SYSTEM}\nAllowed keys: {', '.join(sections)}. "
+            "Classify EVERY item in the input array. "
+            "For each item return the name verbatim and one section key.",
+            json.dumps(miss_names, ensure_ascii=False), temperature=C.TEMPERATURE_STRICT,
+            response_format={"type": "json_schema",
+                             "json_schema": {"name": "sections", "strict": True,
+                                             "schema": _section_batch_schema(sections)}},
+        )
+        data = _safe_json_load(out)
+        by_name: dict[str, str] = {}
+        if data:
+            by_name = {str(r.get("name") or ""): r.get("section")
+                       for r in (data.get("results") or [])}
+        for idx, n in misses:
+            sec = by_name.get(n)
+            if sec in sections:
+                results[idx] = (sec, C.LLM_CONF_HIGH)
+                if _CACHE_ENABLED:
+                    _categorize_cache.set(("cat", n.lower().strip(), sections_key),
+                                          (sec, C.LLM_CONF_HIGH))
+            else:
+                results[idx] = (fallback, C.LLM_CONF_LOW)
+
+    return [r or (fallback, C.LLM_CONF_LOW) for r in results]
 
 
 # ---- LLM-предложение блюда (для /v1/suggest, dish-тип) ----
@@ -465,16 +508,13 @@ def extract_recipe_from_text(text: str) -> dict:
 
 def parse_recipe(url: str, categorizer: brain.Categorizer,
                  sections: Optional[list[str]] = None, lang: Optional[str] = None) -> Recipe:
-    """Full URL → Recipe pipeline.
+    """Full URL → Recipe pipeline (cached by URL + sections + lang)."""
+    key = ("recipe", url, tuple(sorted(sections or ())), lang or "")
+    if _CACHE_ENABLED:
+        cached = _recipe_cache.get(key)
+        if cached is not None:
+            return Recipe.model_validate(cached)
 
-    Pipeline:
-      1. ``web_fetch`` — browser-like fetch with realistic headers + retries
-      2. ``extract_jsonld`` — free path for sites with structured Recipe markup
-      3. ``extract_recipe_from_text`` — LLM fallback on cleaned main content,
-         then ``validate_against_source`` drops hallucinated items
-      4. section tagging — fast classifier for default ``brain.SECTIONS``, or
-         batched LLM (``categorize_llm_batch``) for caller-supplied custom taxonomy
-    """
     fetched = web_fetch(url, lang=lang)
     html, text = fetched["html"], fetched["text"]
 
@@ -483,17 +523,19 @@ def parse_recipe(url: str, categorizer: brain.Categorizer,
         data = extract_recipe_from_text(text)
 
     ings = data.get("ingredients") or []
-    if not ings:
-        return Recipe.model_validate(data)
+    if ings:
+        if sections:
+            labels = [ing.get("name") or ing.get("raw") or "" for ing in ings]
+            tagged = categorize_llm_batch(labels, sections)
+            fallback = _fallback_section(sections)
+            for ing, (sec, _conf) in zip(ings, tagged):
+                ing["section"] = sec if (ing.get("name") or ing.get("raw")) else fallback
+        else:
+            for ing in ings:
+                label = ing.get("name") or ing.get("raw") or ""
+                ing["section"] = categorizer.predict(label)[0] if label else C.DEFAULT_FALLBACK_SECTION
 
-    if sections:
-        labels = [ing.get("name") or ing.get("raw") or "" for ing in ings]
-        tagged = categorize_llm_batch(labels, sections)
-        fallback = _fallback_section(sections)
-        for ing, (sec, _conf) in zip(ings, tagged):
-            ing["section"] = sec if (ing.get("name") or ing.get("raw")) else fallback
-    else:
-        for ing in ings:
-            label = ing.get("name") or ing.get("raw") or ""
-            ing["section"] = categorizer.predict(label)[0] if label else C.DEFAULT_FALLBACK_SECTION
-    return Recipe.model_validate(data)
+    recipe = Recipe.model_validate(data)
+    if _CACHE_ENABLED and data.get("source") in ("jsonld", "llm"):
+        _recipe_cache.set(key, recipe.model_dump())
+    return recipe
