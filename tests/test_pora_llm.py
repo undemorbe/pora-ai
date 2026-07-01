@@ -81,6 +81,109 @@ class TestRefusal:
 # --------------------------------------------------------------------------
 # guard_on_topic
 # --------------------------------------------------------------------------
+class TestSafeJsonLoad:
+    def test_none_input(self):
+        assert ai._safe_json_load(None) is None
+
+    def test_empty_string(self):
+        assert ai._safe_json_load("") is None
+
+    def test_valid_json(self):
+        assert ai._safe_json_load('{"a": 1}') == {"a": 1}
+
+    def test_stripped_code_fences(self):
+        assert ai._safe_json_load('```json\n{"a": 1}\n```') == {"a": 1}
+
+    def test_malformed_returns_none(self):
+        assert ai._safe_json_load("not json {") is None
+
+
+class TestChatRetry:
+    def test_returns_none_when_disabled(self, monkeypatch):
+        monkeypatch.setattr(ai, "API_KEY", "")
+        assert ai._chat("s", "u") is None
+
+    def test_non_transient_returns_none_no_retry(self, monkeypatch):
+        monkeypatch.setattr(ai, "API_KEY", "test")
+        calls = {"n": 0}
+
+        class _Cli:
+            class chat:
+                class completions:
+                    @staticmethod
+                    def create(**kw):
+                        calls["n"] += 1
+                        raise ValueError("permanent bad request")
+
+        monkeypatch.setattr(ai, "client", lambda: _Cli())
+        # transient list is empty (no openai import in test) → any exception is non-transient
+        monkeypatch.setattr(ai, "_transient_llm_errors", lambda: ())
+        result = ai._chat("s", "u")
+        assert result is None
+        assert calls["n"] == 1  # no retry for non-transient
+
+    def test_transient_retries_then_succeeds(self, monkeypatch):
+        monkeypatch.setattr(ai, "API_KEY", "test")
+        monkeypatch.setattr(ai, "LLM_RETRY_BACKOFF_S", 0, raising=False)
+        # patch constants module used by pora_llm
+        import constants
+        monkeypatch.setattr(constants, "LLM_RETRY_BACKOFF_S", 0)
+
+        class TransientErr(Exception):
+            pass
+
+        monkeypatch.setattr(ai, "_transient_llm_errors", lambda: (TransientErr,))
+        calls = {"n": 0}
+
+        class _Msg:
+            content = "OK"
+
+        class _Choice:
+            message = _Msg()
+
+        class _Resp:
+            choices = [_Choice()]
+
+        class _Cli:
+            class chat:
+                class completions:
+                    @staticmethod
+                    def create(**kw):
+                        calls["n"] += 1
+                        if calls["n"] < 3:
+                            raise TransientErr("network")
+                        return _Resp()
+
+        monkeypatch.setattr(ai, "client", lambda: _Cli())
+        result = ai._chat("s", "u")
+        assert result == "OK"
+        assert calls["n"] == 3
+
+    def test_transient_exhausts_retries_returns_none(self, monkeypatch):
+        monkeypatch.setattr(ai, "API_KEY", "test")
+        import constants
+        monkeypatch.setattr(constants, "LLM_RETRY_BACKOFF_S", 0)
+
+        class TransientErr(Exception):
+            pass
+
+        monkeypatch.setattr(ai, "_transient_llm_errors", lambda: (TransientErr,))
+        calls = {"n": 0}
+
+        class _Cli:
+            class chat:
+                class completions:
+                    @staticmethod
+                    def create(**kw):
+                        calls["n"] += 1
+                        raise TransientErr("permanently down")
+
+        monkeypatch.setattr(ai, "client", lambda: _Cli())
+        assert ai._chat("s", "u") is None
+        # LLM_MAX_RETRIES + 1 attempts total
+        assert calls["n"] == constants.LLM_MAX_RETRIES + 1
+
+
 class TestGuardOnTopic:
     def test_food_topic_passes(self):
         assert ai.guard_on_topic("как сварить борщ?")

@@ -11,6 +11,7 @@ import datetime as dt
 from fastapi import FastAPI, HTTPException
 
 import brain
+import constants as C
 import pora_llm as ai
 from schemas import (
     BriefRequest, CategorizeRequest, ChatRequest, NotifyTimeRequest,
@@ -22,7 +23,7 @@ app = FastAPI(title="Pora AI", version="2.0.0",
                           "рекомендации, парсинг рецептов, советы и заскоупленный чат.")
 
 _cat = brain.Categorizer().fit()
-FAST_LANGS = {"ru", "en"}  # языки быстрого классификатора; остальное → LLM
+FAST_LANGS = C.FAST_LANGS  # backward-compat alias for tests / external code
 
 
 @app.get("/health")
@@ -87,10 +88,10 @@ def categorize(req: CategorizeRequest):
 
     for name in req.names:
         lang = req.lang or ai.detect_lang(name)
-        if lang in FAST_LANGS:
+        if lang in C.FAST_LANGS:
             key, conf = _cat.predict(name)
             method = "fast"
-            if conf < 0.45 and ai.llm_enabled():
+            if conf < C.FAST_ESCALATE_CONF_BELOW and ai.llm_enabled():
                 key, conf, method = *ai.categorize_llm(name), "llm"
         else:
             key, conf = ai.categorize_llm(name)
@@ -168,7 +169,7 @@ def suggest(req: SuggestRequest):
             dish_list = [{
                 "type": "dish", "product": None, "recipe": dish["dish"],
                 "reason": dish.get("reason") or brain.reason_label("dish", lang),
-                "score": 0.5,
+                "score": C.DISH_DEFAULT_SCORE,
                 "meta": {"top_cuisine": rec["top_cuisine"], "source": "llm"},
             }]
 
