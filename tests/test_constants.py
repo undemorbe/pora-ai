@@ -86,3 +86,56 @@ class TestModulesUseConstants:
     def test_main_fast_langs_matches(self):
         import main
         assert main.FAST_LANGS is C.FAST_LANGS
+
+
+class TestFewShot:
+    def test_categorize_examples_present(self):
+        assert "categorize" in C.FEW_SHOT_EXAMPLES
+        assert len(C.FEW_SHOT_EXAMPLES["categorize"]) >= 5
+
+    def test_recipe_extract_examples_present(self):
+        assert "recipe_extract" in C.FEW_SHOT_EXAMPLES
+        assert len(C.FEW_SHOT_EXAMPLES["recipe_extract"]) >= 3
+
+    def test_all_assistant_payloads_are_valid_json(self):
+        import json
+        for group in C.FEW_SHOT_EXAMPLES.values():
+            for pair in group:
+                assert {"user", "assistant"} <= set(pair)
+                json.loads(pair["assistant"])  # raises if malformed
+
+    def test_categorize_examples_use_default_sections(self):
+        import json
+        for pair in C.FEW_SHOT_EXAMPLES["categorize"]:
+            data = json.loads(pair["assistant"])
+            assert data["section"] in C.DEFAULT_SECTIONS
+
+
+class TestModelRouting:
+    def test_kinds_defined(self):
+        assert C.LLM_MODEL_KIND_MAIN == "main"
+        assert C.LLM_MODEL_KIND_FAST == "fast"
+
+    def test_routing_table_covers_all_callers(self):
+        expected = {"categorize", "categorize_batch", "dish", "tip",
+                    "chat", "recipe_extract"}
+        assert expected == set(C.LLM_MODEL_ROUTING)
+
+    def test_routing_values_are_valid_kinds(self):
+        valid = {C.LLM_MODEL_KIND_MAIN, C.LLM_MODEL_KIND_FAST}
+        for kind in C.LLM_MODEL_ROUTING.values():
+            assert kind in valid
+
+
+class TestCacheDefaults:
+    def test_categorize_cache_defaults(self):
+        assert C.CATEGORIZE_CACHE_SIZE > 0
+        assert C.CATEGORIZE_CACHE_TTL_S > 0
+
+    def test_recipe_cache_defaults(self):
+        assert C.RECIPE_CACHE_SIZE > 0
+        assert C.RECIPE_CACHE_TTL_S > 0
+
+    def test_cache_env_name(self):
+        assert C.CACHE_ENABLED_ENV == "PORA_CACHE_ENABLED"
+        assert C.CACHE_ENABLED_DEFAULT is True

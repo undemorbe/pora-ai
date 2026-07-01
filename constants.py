@@ -97,6 +97,16 @@ DEFAULT_USER_AGENT = (
 )
 
 # ==========================================================================
+# In-process cache (see _cache.TTLCache)
+# ==========================================================================
+CATEGORIZE_CACHE_SIZE = 2048
+CATEGORIZE_CACHE_TTL_S = 3600           # 1 hour
+RECIPE_CACHE_SIZE = 256
+RECIPE_CACHE_TTL_S = 86_400              # 24 hours
+CACHE_ENABLED_ENV = "PORA_CACHE_ENABLED"
+CACHE_ENABLED_DEFAULT = True
+
+# ==========================================================================
 # LLM plumbing
 # ==========================================================================
 LLM_TEXT_CAP = 8_000                # chars fed to extract_recipe_from_text
@@ -112,6 +122,22 @@ TEMPERATURE_STRICT = 0.0            # categorization / extraction
 TEMPERATURE_CHAT = 0.6              # user-facing chat
 TEMPERATURE_TIP = 0.8               # creative tip
 TEMPERATURE_DISH = 0.7              # dish suggestion
+
+# ==========================================================================
+# Model routing — cheap-vs-main split
+# ==========================================================================
+LLM_MODEL_KIND_MAIN = "main"
+LLM_MODEL_KIND_FAST = "fast"
+
+# Jump table: which call kind picks which env-configured model.
+LLM_MODEL_ROUTING: dict[str, str] = {
+    "categorize":       LLM_MODEL_KIND_FAST,
+    "categorize_batch": LLM_MODEL_KIND_FAST,
+    "dish":             LLM_MODEL_KIND_FAST,
+    "tip":              LLM_MODEL_KIND_FAST,
+    "chat":             LLM_MODEL_KIND_MAIN,
+    "recipe_extract":   LLM_MODEL_KIND_MAIN,
+}
 
 # ==========================================================================
 # Language detection
@@ -218,4 +244,44 @@ RECIPE_EXTRACT_SYSTEM = (
 HTML_ENTITIES: dict[str, str] = {
     "&amp;": "&", "&lt;": "<", "&gt;": ">", "&quot;": '"',
     "&#39;": "'", "&apos;": "'", "&nbsp;": " ",
+}
+
+# ==========================================================================
+# Few-shot examples injected into structured-output prompts
+# ==========================================================================
+FEW_SHOT_EXAMPLES: dict[str, list[dict]] = {
+    "categorize": [
+        {"user": "молоко",         "assistant": '{"section": "dairy"}'},
+        {"user": "chicken breast", "assistant": '{"section": "meat_fish"}'},
+        {"user": "свежий базилик", "assistant": '{"section": "produce"}'},
+        {"user": "багет",          "assistant": '{"section": "bakery"}'},
+        {"user": "кока-кола",      "assistant": '{"section": "drinks"}'},
+    ],
+    "recipe_extract": [
+        {
+            "user": "Карбонара: спагетти 400 г, бекон 200 г, яйца 4 шт, пармезан 100 г.",
+            "assistant": (
+                '{"title": "Карбонара", "ingredients": ['
+                '{"raw":"спагетти 400 г","name":"спагетти","qty":400,"unit":"г"},'
+                '{"raw":"бекон 200 г","name":"бекон","qty":200,"unit":"г"},'
+                '{"raw":"яйца 4 шт","name":"яйца","qty":4,"unit":"шт"},'
+                '{"raw":"пармезан 100 г","name":"пармезан","qty":100,"unit":"г"}'
+                "]}"
+            ),
+        },
+        {
+            "user": "French Toast: 2 eggs, 1 cup milk, 4 slices bread.",
+            "assistant": (
+                '{"title": "French Toast", "ingredients": ['
+                '{"raw":"2 eggs","name":"eggs","qty":2,"unit":null},'
+                '{"raw":"1 cup milk","name":"milk","qty":1,"unit":"cup"},'
+                '{"raw":"4 slices bread","name":"bread","qty":4,"unit":"slices"}'
+                "]}"
+            ),
+        },
+        {
+            "user": "How to boil water: turn stove on high, wait until bubbles form.",
+            "assistant": '{"title": null, "ingredients": []}',
+        },
+    ],
 }
