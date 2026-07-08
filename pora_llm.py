@@ -30,10 +30,10 @@ from _cache import TTLCache
 # --------------------------------------------------------------------------
 # Конфиг + ленивый клиент (не трогаем сеть на импорте)
 # --------------------------------------------------------------------------
-BASE_URL = os.getenv("LLM_BASE_URL", "http://localhost:11434/v1")
-API_KEY = os.getenv("LLM_API_KEY", "")
-MODEL_MAIN = os.getenv("LLM_MODEL", "qwen3")
-MODEL_FAST = os.getenv("LLM_MODEL_FAST") or MODEL_MAIN
+BASE_URL = os.getenv(C.LLM_BASE_URL_ENV, C.LLM_BASE_URL_DEFAULT)
+API_KEY = os.getenv(C.LLM_API_KEY_ENV, "")
+MODEL_MAIN = os.getenv(C.LLM_MODEL_ENV, C.LLM_MODEL_DEFAULT)
+MODEL_FAST = os.getenv(C.LLM_MODEL_FAST_ENV) or MODEL_MAIN
 MODEL = MODEL_MAIN                             # backward-compat alias
 
 
@@ -50,7 +50,7 @@ def _cache_enabled_from_env() -> bool:
     raw = os.getenv(C.CACHE_ENABLED_ENV)
     if raw is None:
         return C.CACHE_ENABLED_DEFAULT
-    return raw.strip() not in ("0", "false", "False", "no", "NO")
+    return raw.strip().lower() not in C.ENV_FALSY
 
 
 _CACHE_ENABLED = _cache_enabled_from_env()
@@ -398,9 +398,7 @@ _DISH_SCHEMA = {
 
 def suggest_dish_llm(top_cuisine: str, frequent: list[str], lang: str = "en") -> Optional[dict]:
     """LLM-generated dish suggestion. Returns {dish, reason} or None if LLM disabled/failed."""
-    system = ("You are Pora's cooking assistant. Suggest ONE specific dish name (real dish, "
-              "no invented food) the user could cook from their preferences. "
-              f"Answer fields STRICTLY in language code '{lang}'. Return JSON per schema, no prose.")
+    system = C.DISH_SYSTEM_TEMPLATE.format(lang=lang)
     user = f"Favourite cuisine: {top_cuisine or 'n/a'}. Often buys: {', '.join(frequent) or 'n/a'}."
     resp = _chat_model(
         system, user, _DishResponse,
@@ -416,16 +414,14 @@ def suggest_dish_llm(top_cuisine: str, frequent: list[str], lang: str = "en") ->
 
 # ---- совет по вкусу (мультиязычно) ----
 def generate_tip(top_cuisine: str, frequent: list[str], lang: str = "en") -> dict:
-    system = ("You are Pora's friendly cooking assistant. Give ONE short tip (1-2 sentences): "
-              f"praise the user's taste and suggest a similar dish. Answer in language code '{lang}'.")
+    system = C.TIP_SYSTEM_TEMPLATE.format(lang=lang)
     user = f"Favourite cuisine: {top_cuisine}. Often buys: {', '.join(frequent) or 'n/a'}."
     out = _chat(system, user, temperature=C.TEMPERATURE_TIP,
                 model_kind=C.LLM_MODEL_ROUTING["tip"])
     if out:
         return {"tip": out.strip(), "lang": lang, "source": "llm"}
-    fallback = {"ru": f"Вы любите кухню «{top_cuisine}» — попробуйте что-то похожее!",
-                "en": f"You love {top_cuisine} cuisine — try something similar!"}
-    return {"tip": fallback.get(lang, fallback["en"]), "lang": lang, "source": "fallback"}
+    template = C.TIP_FALLBACKS.get(lang, C.TIP_FALLBACKS["en"])
+    return {"tip": template.format(cuisine=top_cuisine), "lang": lang, "source": "fallback"}
 
 
 # ---- рецепты: JSON-LD (бесплатно) → LLM-фолбэк, любой язык ----
@@ -478,7 +474,7 @@ def html_to_text(html: str) -> str:
 
 def _accept_language(lang: Optional[str]) -> str:
     if not lang:
-        return "en-US,en;q=0.9"
+        return C.ACCEPT_LANGUAGE_DEFAULT
     lang = lang.split("-")[0].lower()
     return f"{lang},{lang};q=0.9,en;q=0.5"
 

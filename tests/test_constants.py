@@ -127,6 +127,37 @@ class TestModelRouting:
             assert kind in valid
 
 
+class TestDeHardcode:
+    def test_recipe_catalog_shape(self):
+        assert len(C.RECIPE_CATALOG) >= 3
+        for r in C.RECIPE_CATALOG:
+            assert r["name"] and r["cuisine"]
+            assert len(r["ingredients"]) >= 2
+
+    def test_default_cuisine_appears_in_catalog(self):
+        assert C.DEFAULT_CUISINE in {r["cuisine"] for r in C.RECIPE_CATALOG}
+
+    def test_prompt_templates_have_lang_placeholder(self):
+        assert "{lang}" in C.DISH_SYSTEM_TEMPLATE
+        assert "{lang}" in C.TIP_SYSTEM_TEMPLATE
+
+    def test_tip_fallbacks_have_cuisine_placeholder(self):
+        assert set(C.TIP_FALLBACKS) >= {"ru", "en"}
+        for tpl in C.TIP_FALLBACKS.values():
+            assert "{cuisine}" in tpl
+
+    def test_env_names_and_defaults(self):
+        assert C.LLM_BASE_URL_ENV == "LLM_BASE_URL"
+        assert C.LLM_API_KEY_ENV == "LLM_API_KEY"
+        assert C.LLM_MODEL_ENV == "LLM_MODEL"
+        assert C.LLM_MODEL_FAST_ENV == "LLM_MODEL_FAST"
+        assert C.LLM_BASE_URL_DEFAULT.startswith("http")
+        assert C.LLM_MODEL_DEFAULT
+
+    def test_env_falsy_lowercase(self):
+        assert all(v == v.lower() for v in C.ENV_FALSY)
+
+
 class TestCacheDefaults:
     def test_categorize_cache_defaults(self):
         assert C.CATEGORIZE_CACHE_SIZE > 0

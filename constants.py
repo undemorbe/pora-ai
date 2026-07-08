@@ -58,6 +58,27 @@ EVENING_WINDOW_START = 16           # inclusive
 EVENING_WINDOW_END = 22             # exclusive → range(16, 22)
 
 # ==========================================================================
+# Recipe catalog — built-in fallback for recommend / suggest
+# ==========================================================================
+# Callers (Go backend) can pass their own catalog per request via the
+# `catalog` field of /v1/recommend and /v1/suggest; this list is only the
+# default when no catalog is supplied. Ingredients are single lowercase
+# tokens (matched against the first token of user product names).
+RECIPE_CATALOG: tuple[dict, ...] = (
+    {"name": "Карбонара", "cuisine": "Итальянская",
+     "ingredients": ("спагетти", "бекон", "яйца", "пармезан")},
+    {"name": "Мак-н-чиз", "cuisine": "Итальянская",
+     "ingredients": ("паста", "сыр", "молоко", "масло")},
+    {"name": "Лазанья", "cuisine": "Итальянская",
+     "ingredients": ("паста", "фарш", "сыр", "помидоры")},
+    {"name": "Том ям", "cuisine": "Азиатская",
+     "ingredients": ("креветки", "грибы", "лайм", "кокос")},
+    {"name": "Сырники", "cuisine": "Завтраки",
+     "ingredients": ("творог", "яйца", "мука", "сахар")},
+)
+DEFAULT_CUISINE = "Итальянская"     # used when history gives no cuisine signal
+
+# ==========================================================================
 # Suggest engine — scoring
 # ==========================================================================
 URGENCY_MULTIPLIERS: dict[str, float] = {"overdue": 1.0, "due": 0.8, "soon": 0.6}
@@ -109,6 +130,17 @@ CACHE_ENABLED_DEFAULT = True
 # ==========================================================================
 # LLM plumbing
 # ==========================================================================
+# Env variable names + defaults (single place to rename/redefault)
+LLM_BASE_URL_ENV = "LLM_BASE_URL"
+LLM_API_KEY_ENV = "LLM_API_KEY"
+LLM_MODEL_ENV = "LLM_MODEL"
+LLM_MODEL_FAST_ENV = "LLM_MODEL_FAST"
+LLM_BASE_URL_DEFAULT = "http://localhost:11434/v1"   # local Ollama
+LLM_MODEL_DEFAULT = "qwen3"
+
+# Values treated as "disabled" for boolean env flags (compared lowercase)
+ENV_FALSY: frozenset[str] = frozenset({"0", "false", "no", "off"})
+
 LLM_TEXT_CAP = 8_000                # chars fed to extract_recipe_from_text
 LLM_CONF_HIGH = 0.9                 # returned when structured output succeeds
 LLM_CONF_LOW = 0.0                  # returned on any failure / disabled
@@ -237,6 +269,26 @@ RECIPE_EXTRACT_SYSTEM = (
     '{"title": null, "ingredients": []}.\n'
     "6. Output: STRICT JSON per the provided schema, no prose, no code fences."
 )
+
+# Templates with a {lang} placeholder, formatted at call time.
+DISH_SYSTEM_TEMPLATE = (
+    "You are Pora's cooking assistant. Suggest ONE specific dish name (real dish, "
+    "no invented food) the user could cook from their preferences. "
+    "Answer fields STRICTLY in language code '{lang}'. Return JSON per schema, no prose."
+)
+TIP_SYSTEM_TEMPLATE = (
+    "You are Pora's friendly cooking assistant. Give ONE short tip (1-2 sentences): "
+    "praise the user's taste and suggest a similar dish. Answer in language code '{lang}'."
+)
+
+# Local fallback when the LLM is disabled/unavailable ({cuisine} placeholder).
+TIP_FALLBACKS: dict[str, str] = {
+    "ru": "Вы любите кухню «{cuisine}» — попробуйте что-то похожее!",
+    "en": "You love {cuisine} cuisine — try something similar!",
+}
+
+# Accept-Language header default when the request carries no lang
+ACCEPT_LANGUAGE_DEFAULT = "en-US,en;q=0.9"
 
 # ==========================================================================
 # HTML entity decoding (used by html_to_text)

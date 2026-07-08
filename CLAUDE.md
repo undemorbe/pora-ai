@@ -82,3 +82,10 @@ Three layers, strict separation. Touching one usually means touching the others 
 - `pora_llm._chat_model(system, user, model_cls, ...)` is the canonical entry
   for structured JSON calls — it does one retry-on-validation-error with the
   pydantic error carried into the corrective prompt.
+- The recipe catalog is NOT hardcoded in logic: `/v1/recommend` and
+  `/v1/suggest` accept an optional `catalog` field (list of
+  `{name, cuisine, ingredients}`); `brain._catalog_or_default` normalizes it
+  (lowercase first-token ingredients) and falls back to
+  `constants.RECIPE_CATALOG` when absent/empty. All prompts, env names,
+  fallback strings live in `constants.py` — never inline new ones in logic
+  modules.

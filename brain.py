@@ -226,15 +226,6 @@ def best_notify_hour(hours: list[int]) -> dict:
 # ============================================================
 # 4. РЕКОМЕНДАЦИЯ ПО ВКУСУ
 # ============================================================
-RECIPE_CATALOG = [
-    {"name": "Карбонара", "cuisine": "Итальянская", "ingredients": {"спагетти", "бекон", "яйца", "пармезан"}},
-    {"name": "Мак-н-чиз", "cuisine": "Итальянская", "ingredients": {"паста", "сыр", "молоко", "масло"}},
-    {"name": "Лазанья", "cuisine": "Итальянская", "ingredients": {"паста", "фарш", "сыр", "помидоры"}},
-    {"name": "Том ям", "cuisine": "Азиатская", "ingredients": {"креветки", "грибы", "лайм", "кокос"}},
-    {"name": "Сырники", "cuisine": "Завтраки", "ingredients": {"творог", "яйца", "мука", "сахар"}},
-]
-
-
 def _first_token(s: str) -> str:
     return s.lower().split()[0] if s and s.strip() else ""
 
@@ -243,14 +234,49 @@ def _tokens(items: list[str]) -> set[str]:
     return {_first_token(p) for p in items if p and p.strip()}
 
 
-def recommend(recipe_imports: list[str], regular_products: list[str]) -> dict:
+def _normalize_catalog(catalog) -> list[dict]:
+    """Turn a caller-supplied (or the built-in) catalog into the internal shape.
+
+    Accepts entries with `ingredients` as any iterable of strings; normalizes
+    each ingredient to its lowercase first token so matching against user
+    product names stays consistent. Entries without a name are dropped;
+    missing cuisine falls back to constants.DEFAULT_CUISINE.
+    """
+    out: list[dict] = []
+    for r in catalog:
+        name = (r.get("name") or "").strip()
+        if not name:
+            continue
+        out.append({
+            "name": name,
+            "cuisine": r.get("cuisine") or C.DEFAULT_CUISINE,
+            "ingredients": {_first_token(i) for i in (r.get("ingredients") or ()) if i and i.strip()},
+        })
+    return [r for r in out if r["ingredients"]]
+
+
+# Built-in catalog, pre-normalized once at import. Kept as a module attribute
+# for backward compatibility with existing callers/tests.
+RECIPE_CATALOG: list[dict] = _normalize_catalog(C.RECIPE_CATALOG)
+
+
+def _catalog_or_default(catalog) -> list[dict]:
+    if not catalog:
+        return RECIPE_CATALOG
+    normalized = _normalize_catalog(catalog)
+    return normalized or RECIPE_CATALOG
+
+
+def recommend(recipe_imports: list[str], regular_products: list[str],
+              catalog: list[dict] | None = None) -> dict:
+    cat = _catalog_or_default(catalog)
     tried = set(recipe_imports)
     regular = _tokens(regular_products)
-    cats = [r["cuisine"] for r in RECIPE_CATALOG if r["name"] in tried]
-    top_cuisine = Counter(cats).most_common(1)[0][0] if cats else "Итальянская"
+    cats = [r["cuisine"] for r in cat if r["name"] in tried]
+    top_cuisine = Counter(cats).most_common(1)[0][0] if cats else C.DEFAULT_CUISINE
 
     best, best_score = None, -1.0
-    for r in RECIPE_CATALOG:
+    for r in cat:
         if r["name"] in tried:
             continue
         bonus = 1.0 if r["cuisine"] == top_cuisine else 0.0
@@ -258,7 +284,7 @@ def recommend(recipe_imports: list[str], regular_products: list[str]) -> dict:
         if bonus + match > best_score:
             best, best_score = r, bonus + match
     if best is None:
-        best = RECIPE_CATALOG[0]
+        best = cat[0]
     match = len(best["ingredients"] & regular) / len(best["ingredients"])
     return {"top_cuisine": top_cuisine, "recipe": best["name"],
             "cuisine": best["cuisine"], "pantry_match": round(match, 2)}
@@ -288,7 +314,8 @@ def suggest_replenish(purchases: list[dict], today: dt.date, lang: str = "en",
 
 def suggest_basket_fit(current_cart: list[str], regular_products: list[str],
                        recipe_imports: list[str], lang: str = "en",
-                       max_items: int = C.DEFAULT_BASKET_MAX) -> list[dict]:
+                       max_items: int = C.DEFAULT_BASKET_MAX,
+                       catalog: list[dict] | None = None) -> list[dict]:
     """For each cart item, find a recipe that uses it and suggest a missing ingredient
     that the user regularly buys (= they'll actually need it)."""
     if not current_cart:
@@ -299,7 +326,7 @@ def suggest_basket_fit(current_cart: list[str], regular_products: list[str],
 
     out: list[dict] = []
     seen_products: set[str] = set()
-    for recipe in RECIPE_CATALOG:
+    for recipe in _catalog_or_default(catalog):
         overlap_cart = recipe["ingredients"] & cart_tokens
         if not overlap_cart:
             continue
@@ -324,15 +351,17 @@ def suggest_basket_fit(current_cart: list[str], regular_products: list[str],
 
 
 def suggest_recipes(recipe_imports: list[str], regular_products: list[str],
-                    lang: str = "en", max_items: int = C.DEFAULT_RECIPE_MAX) -> list[dict]:
+                    lang: str = "en", max_items: int = C.DEFAULT_RECIPE_MAX,
+                    catalog: list[dict] | None = None) -> list[dict]:
     """Rank catalog recipes by cuisine affinity + pantry overlap, exclude already-tried."""
+    cat = _catalog_or_default(catalog)
     tried = set(recipe_imports)
     regular = _tokens(regular_products)
-    cats = [r["cuisine"] for r in RECIPE_CATALOG if r["name"] in tried]
+    cats = [r["cuisine"] for r in cat if r["name"] in tried]
     top_cuisine = Counter(cats).most_common(1)[0][0] if cats else None
 
     ranked = []
-    for r in RECIPE_CATALOG:
+    for r in cat:
         if r["name"] in tried:
             continue
         match = len(r["ingredients"] & regular) / len(r["ingredients"])

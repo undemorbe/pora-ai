@@ -128,6 +128,21 @@ class TestRecommend:
         assert body["top_cuisine"] == "Итальянская"
         assert body["recipe"] != "Карбонара"
 
+    def test_custom_catalog(self, client):
+        r = client.post("/v1/recommend", json={
+            "recipe_imports": ["Плов"],
+            "regular_products": ["картофель"],
+            "catalog": [
+                {"name": "Плов", "cuisine": "Узбекская",
+                 "ingredients": ["рис", "морковь", "баранина"]},
+                {"name": "Оливье", "cuisine": "Русская",
+                 "ingredients": ["картофель", "горошек", "майонез"]},
+            ],
+        })
+        body = r.json()
+        assert body["recipe"] == "Оливье"
+        assert body["top_cuisine"] == "Узбекская"
+
 
 # --------------------------------------------------------------------------
 # /v1/parse-recipe
@@ -346,6 +361,24 @@ class TestSuggestEndpoint:
         for s in body["suggestions"]:
             assert {"type", "product", "recipe", "reason", "score", "meta"} <= set(s)
             assert s["type"] in ("basket_fit", "replenish", "recipe", "dish")
+
+    def test_custom_catalog_drives_basket_fit(self, client):
+        r = client.post("/v1/suggest", json={
+            "current_cart": ["рис"],
+            "regular_products": ["баранина"],
+            "recipe_imports": [],
+            "lang": "ru",
+            "limit": 5,
+            "catalog": [
+                {"name": "Плов", "cuisine": "Узбекская",
+                 "ingredients": ["рис", "морковь", "баранина", "лук"]},
+            ],
+        })
+        suggestions = r.json()["suggestions"]
+        bf = [s for s in suggestions if s["type"] == "basket_fit"]
+        assert bf and all(s["recipe"] == "Плов" for s in bf)
+        # built-in catalog must not leak in
+        assert all(s["recipe"] in (None, "Плов") for s in suggestions)
 
 
 class TestHealthReportsBothModels:

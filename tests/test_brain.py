@@ -246,3 +246,51 @@ class TestSuggestEngine:
         assert brain.reason_label("basket_fit", "ru") == "Подходит к корзине!"
         assert brain.reason_label("basket_fit", "en") == "Pairs with your cart!"
         assert brain.reason_label("basket_fit", "xx") == "Pairs with your cart!"  # fallback to en
+
+
+# --------------------------------------------------------------------------
+# Custom recipe catalog (de-hardcoded RECIPE_CATALOG)
+# --------------------------------------------------------------------------
+CUSTOM_CATALOG = [
+    {"name": "Плов", "cuisine": "Узбекская",
+     "ingredients": ["рис", "морковь", "баранина", "лук"]},
+    {"name": "Оливье", "cuisine": "Русская",
+     "ingredients": ["картофель", "горошек", "колбаса", "майонез"]},
+]
+
+
+class TestCustomCatalog:
+    def test_recommend_uses_supplied_catalog(self):
+        out = brain.recommend(["Плов"], ["картофель", "майонез"], catalog=CUSTOM_CATALOG)
+        assert out["recipe"] == "Оливье"
+        assert out["top_cuisine"] == "Узбекская"
+
+    def test_recommend_none_catalog_falls_back_to_builtin(self):
+        out = brain.recommend(["Карбонара"], ["сыр"])
+        assert out["recipe"] in {r["name"] for r in brain.RECIPE_CATALOG}
+
+    def test_suggest_recipes_with_custom_catalog(self):
+        out = brain.suggest_recipes([], ["рис", "морковь"], "ru", catalog=CUSTOM_CATALOG)
+        assert out
+        names = {s["recipe"] for s in out}
+        assert names <= {"Плов", "Оливье"}
+
+    def test_suggest_basket_fit_with_custom_catalog(self):
+        out = brain.suggest_basket_fit(["рис"], ["баранина"], [], "ru", catalog=CUSTOM_CATALOG)
+        assert out
+        assert all(s["recipe"] == "Плов" for s in out)
+        assert "баранина" in {s["product"] for s in out}
+
+    def test_normalize_drops_nameless_and_empty(self):
+        raw = [{"name": "", "ingredients": ["x"]},
+               {"name": "Ok", "ingredients": []},
+               {"name": "Good", "ingredients": ["Свежий Базилик", "  "]}]
+        norm = brain._normalize_catalog(raw)
+        assert len(norm) == 1
+        assert norm[0]["name"] == "Good"
+        assert norm[0]["ingredients"] == {"свежий"}  # first token, lowercased
+        assert norm[0]["cuisine"]  # default cuisine substituted
+
+    def test_empty_custom_catalog_falls_back_to_builtin(self):
+        out = brain.recommend([], [], catalog=[])
+        assert out["recipe"] in {r["name"] for r in brain.RECIPE_CATALOG}

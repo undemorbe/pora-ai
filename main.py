@@ -115,9 +115,15 @@ def notify_time(req: NotifyTimeRequest):
     return brain.best_notify_hour(hours)
 
 
+def _catalog_dicts(catalog):
+    """Convert pydantic CatalogRecipe list to plain dicts for brain (None passthrough)."""
+    return [r.model_dump() for r in catalog] if catalog else None
+
+
 @app.post("/v1/recommend")
 def recommend(req: RecommendRequest):
-    return brain.recommend(req.recipe_imports, req.regular_products)
+    return brain.recommend(req.recipe_imports, req.regular_products,
+                           catalog=_catalog_dicts(req.catalog))
 
 
 @app.post("/v1/parse-recipe")
@@ -157,15 +163,16 @@ def suggest(req: SuggestRequest):
     """
     today = dt.date.fromisoformat(req.today) if req.today else dt.date.today()
     lang = req.lang or "en"
+    catalog = _catalog_dicts(req.catalog)
 
     basket = brain.suggest_basket_fit(req.current_cart, req.regular_products,
-                                      req.recipe_imports, lang)
+                                      req.recipe_imports, lang, catalog=catalog)
     replenish = brain.suggest_replenish(_parse_dates(req.purchases), today, lang) if req.purchases else []
-    recipes = brain.suggest_recipes(req.recipe_imports, req.regular_products, lang)
+    recipes = brain.suggest_recipes(req.recipe_imports, req.regular_products, lang, catalog=catalog)
 
     dish_list: list[dict] = []
     if ai.llm_enabled():
-        rec = brain.recommend(req.recipe_imports, req.regular_products)
+        rec = brain.recommend(req.recipe_imports, req.regular_products, catalog=catalog)
         dish = ai.suggest_dish_llm(rec["top_cuisine"], req.regular_products, lang)
         if dish and dish.get("dish"):
             dish_list = [{

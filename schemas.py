@@ -6,6 +6,8 @@ from __future__ import annotations
 from typing import Optional
 from pydantic import BaseModel, Field
 
+import constants as C
+
 
 class Purchase(BaseModel):
     product: str
@@ -37,10 +39,24 @@ class NotifyTimeRequest(BaseModel):
     opens: list[str] = Field(..., description="ISO datetime заходов в приложение")
 
 
+class CatalogRecipe(BaseModel):
+    """One entry of a caller-supplied recipe catalog (see RecommendRequest.catalog)."""
+    name: str
+    cuisine: Optional[str] = Field(None, description="Free-form cuisine label; "
+                                                     "defaults to the service-wide default")
+    ingredients: list[str] = Field(default_factory=list,
+                                   description="Ingredient names; matching uses the "
+                                               "lowercase first token of each")
+
+
 class RecommendRequest(BaseModel):
     recipe_imports: list[str] = Field(default_factory=list)
     regular_products: list[str] = Field(default_factory=list)
     lang: Optional[str] = None
+    catalog: Optional[list[CatalogRecipe]] = Field(
+        None,
+        description="Custom recipe catalog. If None, the built-in demo catalog is used.",
+    )
 
 
 class ParseRecipeRequest(BaseModel):
@@ -54,7 +70,7 @@ class ParseRecipeRequest(BaseModel):
 
 
 class TipRequest(BaseModel):
-    top_cuisine: str = "Итальянская"
+    top_cuisine: str = C.DEFAULT_CUISINE
     frequent: list[str] = Field(default_factory=list)
     lang: Optional[str] = None
 
@@ -82,3 +98,8 @@ class SuggestRequest(BaseModel):
                                     description="Items already in the user's cart right now")
     lang: Optional[str] = None
     limit: int = Field(5, ge=1, le=20)
+    catalog: Optional[list[CatalogRecipe]] = Field(
+        None,
+        description="Custom recipe catalog for basket_fit/recipe suggestions. "
+                    "If None, the built-in demo catalog is used.",
+    )
