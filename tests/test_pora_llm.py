@@ -717,3 +717,91 @@ class TestCacheDisabledByEnv:
         ai.categorize_llm("молоко")
         assert calls["n"] == 2
         pora_llm._categorize_cache.clear()
+
+
+class TestChatModel:
+    class _Toy(__import__("pydantic").BaseModel):
+        section: str
+
+    def test_happy_path(self, mock_chat):
+        mock_chat('{"section": "produce"}')
+        out = ai._chat_model("sys", "user", self._Toy)
+        assert out is not None and out.section == "produce"
+
+    def test_retry_on_validation_error(self, mock_chat):
+        calls = {"n": 0, "prompts": []}
+
+        def responder(system, user, **kw):
+            calls["n"] += 1
+            calls["prompts"].append(user)
+            return '{"wrong": "shape"}' if calls["n"] == 1 else '{"section": "dairy"}'
+
+        mock_chat(responder)
+        out = ai._chat_model("sys", "user text", self._Toy)
+        assert out is not None and out.section == "dairy"
+        assert calls["n"] == 2
+        assert "failed validation" in calls["prompts"][1].lower()
+
+    def test_exhausts_retries_returns_none(self, mock_chat):
+        mock_chat(['{"bad": 1}', '{"still": "bad"}'])
+        assert ai._chat_model("sys", "user", self._Toy) is None
+
+    def test_returns_none_when_llm_disabled(self):
+        assert ai._chat_model("sys", "user", self._Toy) is None
+
+    def test_examples_kwarg_accepted(self, mock_chat):
+        mock_chat('{"section": "dairy"}')
+        out = ai._chat_model(
+            "sys", "user",
+            self._Toy,
+            examples=[{"user": "x", "assistant": '{"section": "dairy"}'}],
+        )
+        assert out is not None
+
+
+class TestChatExamplesInjection:
+    def test_chat_injects_examples_between_system_and_user(self, monkeypatch):
+        monkeypatch.setattr(ai, "API_KEY", "test-key")
+        captured = {"messages": None}
+
+        class _Cli:
+            class chat:
+                class completions:
+                    @staticmethod
+                    def create(**kw):
+                        captured["messages"] = kw["messages"]
+
+                        class _M:
+                            content = '{"ok": true}'
+
+                        class _C:
+                            message = _M()
+
+                        class _R:
+                            choices = [_C()]
+
+                        return _R()
+
+        monkeypatch.setattr(ai, "client", lambda: _Cli())
+        monkeypatch.setattr(ai, "_transient_llm_errors", lambda: ())
+
+        ai._chat(
+            "SYSTEM",
+            "REAL_USER",
+            examples=[
+                {"user": "ex_u1", "assistant": "ex_a1"},
+                {"user": "ex_u2", "assistant": "ex_a2"},
+            ],
+        )
+        roles = [m["role"] for m in captured["messages"]]
+        assert roles == ["system", "user", "assistant", "user", "assistant", "user"]
+        contents = [m["content"] for m in captured["messages"]]
+        assert contents == ["SYSTEM", "ex_u1", "ex_a1", "ex_u2", "ex_a2", "REAL_USER"]
+
+
+class TestCategorizeInvalidSectionFallsBack:
+    def test_out_of_enum_section_returns_fallback(self, mock_chat):
+        mock_chat('{"section": "bogus_not_in_enum"}')
+        key, conf = ai.categorize_llm("x")
+        assert key == "other"
+        assert conf == 0.0

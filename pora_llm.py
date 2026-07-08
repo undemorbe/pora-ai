@@ -18,7 +18,7 @@ import json
 import os
 import re
 import time
-from typing import Optional
+from typing import Optional, TypeVar
 
 import httpx
 from pydantic import BaseModel, Field
@@ -138,21 +138,29 @@ def _transient_llm_errors() -> tuple:
     )
 
 
-def _chat(system: str, user: str, temperature: float = 0.4, response_format=None) -> Optional[str]:
+def _chat(system: str, user: str, temperature: float = 0.4,
+          response_format=None,
+          examples: Optional[list[dict]] = None) -> Optional[str]:
     """Single LLM entry point.
 
     Returns None when LLM is disabled OR when a call fails terminally (after
     ``constants.LLM_MAX_RETRIES`` transient retries). Never raises — every
     caller in this module already treats None as "fall back gracefully".
+
+    Optional `examples` are inserted as alternating user/assistant messages
+    between the system prompt and the real user turn.
     """
     if not llm_enabled():
         return None
     transient = _transient_llm_errors()
-    kwargs: dict = dict(
-        model=MODEL, temperature=temperature,
-        messages=[{"role": "system", "content": system},
-                 {"role": "user", "content": user}],
-    )
+
+    messages: list[dict] = [{"role": "system", "content": system}]
+    for pair in examples or []:
+        messages.append({"role": "user", "content": pair["user"]})
+        messages.append({"role": "assistant", "content": pair["assistant"]})
+    messages.append({"role": "user", "content": user})
+
+    kwargs: dict = dict(model=MODEL, temperature=temperature, messages=messages)
     if response_format:
         kwargs["response_format"] = response_format
 
@@ -166,6 +174,55 @@ def _chat(system: str, user: str, temperature: float = 0.4, response_format=None
                 return None
             time.sleep(C.LLM_RETRY_BACKOFF_S * (attempt + 1))
     return None
+
+
+T = TypeVar("T", bound=BaseModel)
+
+
+def _chat_model(
+    system: str,
+    user: str,
+    model_cls: type[T],
+    *,
+    examples: Optional[list[dict]] = None,
+    temperature: float = C.TEMPERATURE_STRICT,
+    response_format: Optional[dict] = None,
+) -> Optional[T]:
+    """LLM call → parsed pydantic model with one retry-on-parse.
+
+    Attempt 1: normal call → _safe_json_load → model_cls.model_validate.
+    On ValidationError, attempt 2 re-issues with the pydantic error text
+    injected into the user prompt so the model can self-correct.
+    On second failure returns None. Never raises.
+    """
+    from pydantic import ValidationError
+
+    def _call(u: str) -> Optional[T]:
+        out = _chat(system, u, temperature=temperature,
+                    response_format=response_format, examples=examples)
+        data = _safe_json_load(out)
+        if data is None:
+            return None
+        try:
+            return model_cls.model_validate(data)
+        except ValidationError as exc:
+            _call.last_error = str(exc)          # type: ignore[attr-defined]
+            return None
+
+    result = _call(user)
+    if result is not None:
+        return result
+
+    err = getattr(_call, "last_error", None)
+    if err is None:
+        return None
+
+    corrective = (
+        f"Your last response failed validation: {err}. "
+        "Return STRICT JSON matching the schema — no prose, no code fences.\n\n"
+        f"Original request:\n{user}"
+    )
+    return _call(corrective)
 
 
 # --------------------------------------------------------------------------
@@ -214,6 +271,29 @@ def _section_batch_schema(sections: list[str]) -> dict:
     }
 
 
+class _SectionResponse(BaseModel):
+    section: str
+
+
+class _SectionBatchItem(BaseModel):
+    name: str
+    section: str
+
+
+class _SectionBatchResponse(BaseModel):
+    results: list[_SectionBatchItem]
+
+
+class _DishResponse(BaseModel):
+    dish: str
+    reason: str
+
+
+class _RecipeResponse(BaseModel):
+    title: Optional[str] = None
+    ingredients: list[dict] = Field(default_factory=list)
+
+
 def _fallback_section(sections: list[str]) -> str:
     return C.DEFAULT_FALLBACK_SECTION if C.DEFAULT_FALLBACK_SECTION in sections else sections[0]
 
@@ -230,29 +310,27 @@ def categorize_llm(name: str, sections: Optional[list[str]] = None) -> tuple[str
         cached = _categorize_cache.get(key)
         if cached is not None:
             return cached
-    out = _chat(
+
+    examples = C.FEW_SHOT_EXAMPLES.get("categorize") if sections == list(brain.SECTIONS) else None
+    resp = _chat_model(
         f"{C.CATEGORIZE_SYSTEM}\nAllowed keys: {', '.join(sections)}.",
-        name, temperature=C.TEMPERATURE_STRICT,
+        name, _SectionResponse,
+        examples=examples,
         response_format={"type": "json_schema",
                          "json_schema": {"name": "section", "strict": True,
                                          "schema": _section_schema(sections)}},
     )
-    data = _safe_json_load(out)
-    if not data or "section" not in data:
-        result = (_fallback_section(sections), C.LLM_CONF_LOW)
-    else:
-        result = (data["section"], C.LLM_CONF_HIGH)
-    if _CACHE_ENABLED and result[1] == C.LLM_CONF_HIGH:
+    if resp is None or resp.section not in sections:
+        return _fallback_section(sections), C.LLM_CONF_LOW
+
+    result = (resp.section, C.LLM_CONF_HIGH)
+    if _CACHE_ENABLED:
         _categorize_cache.set(key, result)
     return result
 
 
 def categorize_llm_batch(names: list[str], sections: Optional[list[str]] = None) -> list[tuple[str, float]]:
-    """Batched LLM categorization with per-item cache hits.
-
-    Cache is consulted per-name before any LLM call. Only misses go to the LLM
-    (one batched call). Fresh results are written back to cache individually.
-    """
+    """Batched LLM categorization with per-item cache + one retry-on-parse."""
     if not names:
         return []
     sections = _sections_or_default(sections)
@@ -261,7 +339,6 @@ def categorize_llm_batch(names: list[str], sections: Optional[list[str]] = None)
 
     results: list[Optional[tuple[str, float]]] = [None] * len(names)
     misses: list[tuple[int, str]] = []
-
     for i, n in enumerate(names):
         key = ("cat", n.lower().strip(), sections_key)
         cached = _categorize_cache.get(key) if _CACHE_ENABLED else None
@@ -272,20 +349,19 @@ def categorize_llm_batch(names: list[str], sections: Optional[list[str]] = None)
 
     if misses:
         miss_names = [n for _, n in misses]
-        out = _chat(
+        resp = _chat_model(
             f"{C.CATEGORIZE_SYSTEM}\nAllowed keys: {', '.join(sections)}. "
             "Classify EVERY item in the input array. "
             "For each item return the name verbatim and one section key.",
-            json.dumps(miss_names, ensure_ascii=False), temperature=C.TEMPERATURE_STRICT,
+            json.dumps(miss_names, ensure_ascii=False),
+            _SectionBatchResponse,
             response_format={"type": "json_schema",
                              "json_schema": {"name": "sections", "strict": True,
                                              "schema": _section_batch_schema(sections)}},
         )
-        data = _safe_json_load(out)
         by_name: dict[str, str] = {}
-        if data:
-            by_name = {str(r.get("name") or ""): r.get("section")
-                       for r in (data.get("results") or [])}
+        if resp is not None:
+            by_name = {item.name: item.section for item in resp.results}
         for idx, n in misses:
             sec = by_name.get(n)
             if sec in sections:
@@ -312,14 +388,15 @@ def suggest_dish_llm(top_cuisine: str, frequent: list[str], lang: str = "en") ->
               "no invented food) the user could cook from their preferences. "
               f"Answer fields STRICTLY in language code '{lang}'. Return JSON per schema, no prose.")
     user = f"Favourite cuisine: {top_cuisine or 'n/a'}. Often buys: {', '.join(frequent) or 'n/a'}."
-    out = _chat(system, user, temperature=C.TEMPERATURE_DISH,
-                response_format={"type": "json_schema",
-                                 "json_schema": {"name": "dish", "strict": True, "schema": _DISH_SCHEMA}})
-    data = _safe_json_load(out)
-    if not data:
+    resp = _chat_model(
+        system, user, _DishResponse,
+        temperature=C.TEMPERATURE_DISH,
+        response_format={"type": "json_schema",
+                         "json_schema": {"name": "dish", "strict": True, "schema": _DISH_SCHEMA}},
+    )
+    if resp is None:
         return None
-    return {"dish": str(data.get("dish") or "").strip(),
-            "reason": str(data.get("reason") or "").strip()}
+    return {"dish": resp.dish.strip(), "reason": resp.reason.strip()}
 
 
 # ---- совет по вкусу (мультиязычно) ----
@@ -493,17 +570,20 @@ def extract_jsonld(html: str) -> Optional[dict]:
 
 def extract_recipe_from_text(text: str) -> dict:
     """LLM-based extraction with anti-hallucination validation against source text."""
-    out = _chat(
-        C.RECIPE_EXTRACT_SYSTEM, text[:C.LLM_TEXT_CAP], temperature=C.TEMPERATURE_STRICT,
+    resp = _chat_model(
+        C.RECIPE_EXTRACT_SYSTEM, text[:C.LLM_TEXT_CAP], _RecipeResponse,
+        examples=C.FEW_SHOT_EXAMPLES.get("recipe_extract"),
         response_format={"type": "json_schema",
                          "json_schema": {"name": "recipe", "strict": True, "schema": _RECIPE_SCHEMA}},
     )
-    data = _safe_json_load(out)
-    if not data:
+    if resp is None:
         return {"title": None, "ingredients": [], "source": "none"}
-    data["ingredients"] = validate_against_source(data.get("ingredients") or [], text)
-    data["source"] = "llm" if data["ingredients"] else "none"
-    return data
+    validated = validate_against_source(resp.ingredients, text)
+    return {
+        "title": resp.title,
+        "ingredients": validated,
+        "source": "llm" if validated else "none",
+    }
 
 
 def parse_recipe(url: str, categorizer: brain.Categorizer,
