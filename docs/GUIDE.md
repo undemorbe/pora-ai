@@ -131,6 +131,7 @@ curl http://localhost:8000/health
   "status": "ok",
   "version": "2.0.0",
   "llm_enabled": true,
+  "models": {"main": "qwen3", "fast": "qwen3"},
   "sections": ["dairy", "produce", "bakery", "pantry", "drinks", "meat_fish", "other"],
   "fast_langs": ["en", "ru"],
   "refusal_langs": ["ar", "de", "en", "es", "fr", "he", "hi", "it", "ja", "ko", "pl", "pt", "ru", "tr", "zh"]
@@ -367,9 +368,11 @@ curl http://localhost:8000/health
 ```
 
 Ответ — см. [шаг 2.4](#24-шаг-3--проверить-что-сервис-жив). Поля: `status`,
-`version`, `llm_enabled` (задан ли ключ), `sections` (канонические ключи
-разделов), `fast_langs` (языки быстрого классификатора), `refusal_langs`
-(языки локализованных отказов).
+`version`, `llm_enabled` (задан ли ключ), `models` (какая модель используется
+как основная `main` и какая как быстрая `fast` — совпадают, если
+`LLM_MODEL_FAST` не задана), `sections` (канонические ключи разделов),
+`fast_langs` (языки быстрого классификатора), `refusal_langs` (языки
+локализованных отказов).
 
 ### 6.2. `POST /v1/replenishment` — прогноз пополнения
 
