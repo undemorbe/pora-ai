@@ -1,0 +1,35 @@
+name: Lint
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: lint-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ruff:
+    name: Ruff (style + basic bugs)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install ruff
+        run: python -m pip install --upgrade pip ruff
+
+      - name: Run ruff
+        # Fail on real bugs; keep style warnings visible but non-blocking.
+        # E: pycodestyle errors, F: pyflakes (unused imports/vars), B: bugbear
+        run: |
+          ruff check --select E,F,B --ignore E501,E402 --output-format=github . || true
+          ruff check --select F --output-format=github .
