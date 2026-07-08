@@ -346,3 +346,12 @@ class TestSuggestEndpoint:
         for s in body["suggestions"]:
             assert {"type", "product", "recipe", "reason", "score", "meta"} <= set(s)
             assert s["type"] in ("basket_fit", "replenish", "recipe", "dish")
+
+
+class TestHealthReportsBothModels:
+    def test_health_has_models_object(self, client, monkeypatch):
+        import pora_llm
+        monkeypatch.setattr(pora_llm, "MODEL_MAIN", "big-m")
+        monkeypatch.setattr(pora_llm, "MODEL_FAST", "small-m")
+        body = client.get("/health").json()
+        assert body["models"] == {"main": "big-m", "fast": "small-m"}

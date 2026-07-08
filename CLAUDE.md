@@ -73,3 +73,12 @@ Three layers, strict separation. Touching one usually means touching the others 
 - The off-topic `_OFFTOPIC` tuple is intentionally crude — it's a pre-LLM cost guard, not a security boundary. The real scope rule lives in `SCOPE_SYSTEM` prompt.
 - Module-level `_cat` in `main.py` is fit once at import; tests/scripts that import `main` pay that cost. `smoke_test.py` relies on this.
 - `_chat()` returns `None` when LLM disabled — every caller must handle `None` and fall back, never raise.
+- `pora_llm.MODEL_MAIN` / `MODEL_FAST` are the two model envs (`LLM_MODEL`
+  and optional `LLM_MODEL_FAST`). Every LLM call site declares its
+  `model_kind` (fast for categorize/dish/tip, main for chat/recipe_extract).
+  `pora_llm.MODEL` is retained as a backward-compat alias for external code.
+- `pora_llm._categorize_cache` and `_recipe_cache` are per-process TTL caches.
+  Set `PORA_CACHE_ENABLED=0` to bypass; call `.clear()` between test runs.
+- `pora_llm._chat_model(system, user, model_cls, ...)` is the canonical entry
+  for structured JSON calls — it does one retry-on-validation-error with the
+  pydantic error carried into the corrective prompt.

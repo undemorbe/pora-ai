@@ -28,7 +28,9 @@ FAST_LANGS = C.FAST_LANGS  # backward-compat alias for tests / external code
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "version": app.version, "llm_enabled": ai.llm_enabled(),
+    return {"status": "ok", "version": app.version,
+            "llm_enabled": ai.llm_enabled(),
+            "models": {"main": ai.MODEL_MAIN, "fast": ai.MODEL_FAST},
             "sections": brain.SECTIONS, "fast_langs": sorted(FAST_LANGS),
             "refusal_langs": sorted(ai.REFUSALS)}
 

@@ -32,7 +32,13 @@ from _cache import TTLCache
 # --------------------------------------------------------------------------
 BASE_URL = os.getenv("LLM_BASE_URL", "http://localhost:11434/v1")
 API_KEY = os.getenv("LLM_API_KEY", "")
-MODEL = os.getenv("LLM_MODEL", "qwen3")
+MODEL_MAIN = os.getenv("LLM_MODEL", "qwen3")
+MODEL_FAST = os.getenv("LLM_MODEL_FAST") or MODEL_MAIN
+MODEL = MODEL_MAIN                             # backward-compat alias
+
+
+def _resolve_model(kind: str) -> str:
+    return MODEL_FAST if kind == C.LLM_MODEL_KIND_FAST else MODEL_MAIN
 
 _client = None
 
@@ -140,7 +146,8 @@ def _transient_llm_errors() -> tuple:
 
 def _chat(system: str, user: str, temperature: float = 0.4,
           response_format=None,
-          examples: Optional[list[dict]] = None) -> Optional[str]:
+          examples: Optional[list[dict]] = None,
+          model_kind: str = C.LLM_MODEL_KIND_MAIN) -> Optional[str]:
     """Single LLM entry point.
 
     Returns None when LLM is disabled OR when a call fails terminally (after
@@ -149,6 +156,8 @@ def _chat(system: str, user: str, temperature: float = 0.4,
 
     Optional `examples` are inserted as alternating user/assistant messages
     between the system prompt and the real user turn.
+
+    ``model_kind`` selects between MODEL_MAIN and MODEL_FAST via _resolve_model.
     """
     if not llm_enabled():
         return None
@@ -160,7 +169,7 @@ def _chat(system: str, user: str, temperature: float = 0.4,
         messages.append({"role": "assistant", "content": pair["assistant"]})
     messages.append({"role": "user", "content": user})
 
-    kwargs: dict = dict(model=MODEL, temperature=temperature, messages=messages)
+    kwargs: dict = dict(model=_resolve_model(model_kind), temperature=temperature, messages=messages)
     if response_format:
         kwargs["response_format"] = response_format
 
@@ -187,6 +196,7 @@ def _chat_model(
     examples: Optional[list[dict]] = None,
     temperature: float = C.TEMPERATURE_STRICT,
     response_format: Optional[dict] = None,
+    model_kind: str = C.LLM_MODEL_KIND_MAIN,
 ) -> Optional[T]:
     """LLM call → parsed pydantic model with one retry-on-parse.
 
@@ -199,7 +209,8 @@ def _chat_model(
 
     def _call(u: str) -> Optional[T]:
         out = _chat(system, u, temperature=temperature,
-                    response_format=response_format, examples=examples)
+                    response_format=response_format, examples=examples,
+                    model_kind=model_kind)
         data = _safe_json_load(out)
         if data is None:
             return None
@@ -241,7 +252,8 @@ def chat(message: str, lang: Optional[str] = None) -> dict:
     lang = lang or detect_lang(message)
     if not guard_on_topic(message):
         return {"text": refusal(lang), "lang": lang, "refused": True}
-    out = _chat(C.SCOPE_SYSTEM, message, temperature=C.TEMPERATURE_CHAT)
+    out = _chat(C.SCOPE_SYSTEM, message, temperature=C.TEMPERATURE_CHAT,
+                model_kind=C.LLM_MODEL_KIND_MAIN)
     if out is None:
         return {"text": refusal(lang), "lang": lang, "refused": False, "note": "llm_disabled"}
     return {"text": out.strip(), "lang": lang, "refused": False}
@@ -319,6 +331,7 @@ def categorize_llm(name: str, sections: Optional[list[str]] = None) -> tuple[str
         response_format={"type": "json_schema",
                          "json_schema": {"name": "section", "strict": True,
                                          "schema": _section_schema(sections)}},
+        model_kind=C.LLM_MODEL_KIND_FAST,
     )
     if resp is None or resp.section not in sections:
         return _fallback_section(sections), C.LLM_CONF_LOW
@@ -358,6 +371,7 @@ def categorize_llm_batch(names: list[str], sections: Optional[list[str]] = None)
             response_format={"type": "json_schema",
                              "json_schema": {"name": "sections", "strict": True,
                                              "schema": _section_batch_schema(sections)}},
+            model_kind=C.LLM_MODEL_KIND_FAST,
         )
         by_name: dict[str, str] = {}
         if resp is not None:
@@ -393,6 +407,7 @@ def suggest_dish_llm(top_cuisine: str, frequent: list[str], lang: str = "en") ->
         temperature=C.TEMPERATURE_DISH,
         response_format={"type": "json_schema",
                          "json_schema": {"name": "dish", "strict": True, "schema": _DISH_SCHEMA}},
+        model_kind=C.LLM_MODEL_KIND_FAST,
     )
     if resp is None:
         return None
@@ -404,7 +419,8 @@ def generate_tip(top_cuisine: str, frequent: list[str], lang: str = "en") -> dic
     system = ("You are Pora's friendly cooking assistant. Give ONE short tip (1-2 sentences): "
               f"praise the user's taste and suggest a similar dish. Answer in language code '{lang}'.")
     user = f"Favourite cuisine: {top_cuisine}. Often buys: {', '.join(frequent) or 'n/a'}."
-    out = _chat(system, user, temperature=C.TEMPERATURE_TIP)
+    out = _chat(system, user, temperature=C.TEMPERATURE_TIP,
+                model_kind=C.LLM_MODEL_KIND_FAST)
     if out:
         return {"tip": out.strip(), "lang": lang, "source": "llm"}
     fallback = {"ru": f"Вы любите кухню «{top_cuisine}» — попробуйте что-то похожее!",
@@ -575,6 +591,7 @@ def extract_recipe_from_text(text: str) -> dict:
         examples=C.FEW_SHOT_EXAMPLES.get("recipe_extract"),
         response_format={"type": "json_schema",
                          "json_schema": {"name": "recipe", "strict": True, "schema": _RECIPE_SCHEMA}},
+        model_kind=C.LLM_MODEL_KIND_MAIN,
     )
     if resp is None:
         return {"title": None, "ingredients": [], "source": "none"}

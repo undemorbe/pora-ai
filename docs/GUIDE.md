@@ -782,6 +782,7 @@ curl -X POST http://localhost:8000/v1/suggest \
 | `LLM_BASE_URL` | `http://localhost:11434/v1` | Базовый URL OpenAI-совместимого API. Для Ollama в docker-compose — `http://ollama:11434/v1`; для OpenAI — `https://api.openai.com/v1` |
 | `LLM_API_KEY` | `""` (пусто) | API-ключ. **Пусто → LLM выключен** (graceful degrade, см. раздел 4). Для Ollama годится любая непустая строка, например `ollama` |
 | `LLM_MODEL` | `qwen3` | Имя модели у провайдера: `qwen3`, `qwen3:4b`, `gpt-4o-mini`, … |
+| `LLM_MODEL_FAST` | *(не задана → = `LLM_MODEL`)* | Дешёвая модель для категоризации, советов и подсказок блюд. Основная модель (`LLM_MODEL`) остаётся для чата и парсинга рецептов. |
 | `PORA_CACHE_ENABLED` | включено | In-process-кэш LLM-результатов (см. раздел 8). Значения `0`, `false`, `no` отключают; всё остальное (и отсутствие переменной) — включено. Читается **один раз при старте** процесса |
 
 Все переменные читаются при импорте `pora_llm.py` — после изменения env

@@ -805,3 +805,86 @@ class TestCategorizeInvalidSectionFallsBack:
         key, conf = ai.categorize_llm("x")
         assert key == "other"
         assert conf == 0.0
+
+
+class TestResolveModel:
+    def test_fast_returns_fast_env(self, monkeypatch):
+        monkeypatch.setattr(ai, "MODEL_MAIN", "big-model")
+        monkeypatch.setattr(ai, "MODEL_FAST", "small-model")
+        assert ai._resolve_model("fast") == "small-model"
+        assert ai._resolve_model("main") == "big-model"
+
+    def test_fast_falls_back_to_main_when_unset(self, monkeypatch):
+        monkeypatch.setattr(ai, "MODEL_MAIN", "big-model")
+        monkeypatch.setattr(ai, "MODEL_FAST", "big-model")
+        assert ai._resolve_model("fast") == "big-model"
+
+
+class TestChatUsesModelKind:
+    @staticmethod
+    def _capture_client(captured):
+        class _Cli:
+            class chat:
+                class completions:
+                    @staticmethod
+                    def create(**kw):
+                        captured["model"] = kw["model"]
+
+                        class _M:
+                            content = "ok"
+
+                        class _C:
+                            message = _M()
+
+                        class _R:
+                            choices = [_C()]
+
+                        return _R()
+
+        return _Cli
+
+    def test_default_kind_is_main(self, monkeypatch):
+        monkeypatch.setattr(ai, "API_KEY", "test-key")
+        monkeypatch.setattr(ai, "MODEL_MAIN", "MAIN_M")
+        monkeypatch.setattr(ai, "MODEL_FAST", "FAST_M")
+        captured = {"model": None}
+        monkeypatch.setattr(ai, "client", lambda: self._capture_client(captured)())
+        monkeypatch.setattr(ai, "_transient_llm_errors", lambda: ())
+        ai._chat("s", "u")
+        assert captured["model"] == "MAIN_M"
+
+    def test_fast_kind_uses_fast_model(self, monkeypatch):
+        monkeypatch.setattr(ai, "API_KEY", "test-key")
+        monkeypatch.setattr(ai, "MODEL_MAIN", "MAIN_M")
+        monkeypatch.setattr(ai, "MODEL_FAST", "FAST_M")
+        captured = {"model": None}
+        monkeypatch.setattr(ai, "client", lambda: self._capture_client(captured)())
+        monkeypatch.setattr(ai, "_transient_llm_errors", lambda: ())
+        ai._chat("s", "u", model_kind="fast")
+        assert captured["model"] == "FAST_M"
+
+
+class TestCategorizeUsesFastModel:
+    def test_categorize_llm_routes_fast(self, monkeypatch):
+        captured = {"kind": None}
+
+        def tracing_chat(system, user, temperature=0.4, response_format=None,
+                         examples=None, model_kind="main"):
+            captured["kind"] = model_kind
+            return '{"section": "dairy"}'
+
+        monkeypatch.setattr(ai, "_chat", tracing_chat)
+        ai.categorize_llm("молоко")
+        assert captured["kind"] == "fast"
+
+    def test_chat_routes_main(self, monkeypatch):
+        captured = {"kind": None}
+
+        def tracing_chat(system, user, temperature=0.4, response_format=None,
+                         examples=None, model_kind="main"):
+            captured["kind"] = model_kind
+            return "ответ"
+
+        monkeypatch.setattr(ai, "_chat", tracing_chat)
+        ai.chat("как сварить борщ?")
+        assert captured["kind"] == "main"
