@@ -33,9 +33,13 @@ pytest -k suggest            # filter by name
 
 `smoke_test.py` remains as the quick demo. The real regression check is the `tests/` suite — extend it when adding endpoints. LLM is never called for real in tests: `tests/conftest.py` provides `mock_chat`/`enable_llm` fixtures that monkey-patch `pora_llm._chat`.
 
+Machine quirks: bare `pip`/`pytest` are NOT on PATH — use `python3 -m pip install --user ...` and `python3 -m pytest`. System Python is 3.9 (Xcode): `list[str]`/`type[T]` annotations only work because every module has `from __future__ import annotations` — keep it in new files.
+
+Worktree gotcha: the session cwd can silently reset to the main repo root between turns; the main checkout holds STALE copies of the same files. When working in `.claude/worktrees/*`, verify `pwd` before relative-path commands (or use absolute paths).
+
 ## Env contract
 
-`LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL`. If `LLM_API_KEY` is empty, `llm_enabled()` returns `False` and every LLM path falls back gracefully (RU/EN fast classifier, JSON-LD for recipes, localized refusal for chat/tip). Never raise on missing key — preserve this graceful-degrade behavior.
+`LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL`, optional `LLM_MODEL_FAST` (cheap model for categorize/tip/dish; unset → same as `LLM_MODEL`), `PORA_CACHE_ENABLED` (default on; `0` disables the TTL caches). If `LLM_API_KEY` is empty, `llm_enabled()` returns `False` and every LLM path falls back gracefully (RU/EN fast classifier, JSON-LD for recipes, localized refusal for chat/tip). Never raise on missing key — preserve this graceful-degrade behavior.
 
 ## Architecture
 
@@ -58,7 +62,7 @@ Three layers, strict separation. Touching one usually means touching the others 
   - `categorize_llm` / `extract_recipe_from_text` use OpenAI structured-output (`response_format=json_schema, strict=True`). Section enum mirrors `brain.SECTIONS`.
   - `parse_recipe`: HTTP fetch → `extract_jsonld` (free path) → LLM fallback over **stripped HTML text** (`html_to_text`) → `validate_against_source` drops any ingredient whose `raw`/`name` does not literally appear in the source (anti-hallucination guard) → quick classifier tags each ingredient with a section. Walks `@graph` and `@type` arrays for JSON-LD recipes. If LLM hallucinates everything, `source` flips back to `"none"` and ingredients are empty.
   - `suggest_dish_llm` — JSON-schema-constrained LLM dish suggester used by `/v1/suggest` for the `dish` slot. Returns `None` when LLM disabled.
-  - `REFUSALS` — 8 languages; unknown lang → English.
+  - `REFUSALS` — 15 languages; unknown lang → English.
 
 - **`main.py`** — thin FastAPI endpoints. `/v1/categorize` is the only place where the routing rule lives: `lang ∈ {ru, en}` → fast classifier (and escalate to LLM only when `confidence < 0.45` AND LLM enabled), other languages → LLM directly. Keep that routing in `main.py`, not inside `brain` or `pora_llm`. `/v1/suggest` is the only endpoint that fuses multiple `brain.suggest_*` engines + an LLM dish slot through `brain.merge_suggestions` — keep the fusion glue here, suggestion engines stay pure in `brain.py`.
 
@@ -70,7 +74,7 @@ Three layers, strict separation. Touching one usually means touching the others 
 
 - Section keys come from `brain.SECTIONS` — when adding a section, update both `brain.SECTIONS`, `brain.SECTION_LABELS` (ru + en), `brain.TRAINING` (or LLM-only sections won't classify), and the LLM enum is auto-derived.
 - Adding a refusal language: append to `pora_llm.REFUSALS` AND extend `detect_lang` heuristics, otherwise the language never resolves and falls back to English.
-- The off-topic `_OFFTOPIC` tuple is intentionally crude — it's a pre-LLM cost guard, not a security boundary. The real scope rule lives in `SCOPE_SYSTEM` prompt.
+- The off-topic `constants.OFFTOPIC_MARKERS` tuple is intentionally crude — it's a pre-LLM cost guard, not a security boundary. The real scope rule lives in `SCOPE_SYSTEM` prompt.
 - Module-level `_cat` in `main.py` is fit once at import; tests/scripts that import `main` pay that cost. `smoke_test.py` relies on this.
 - `_chat()` returns `None` when LLM disabled — every caller must handle `None` and fall back, never raise.
 - `pora_llm.MODEL_MAIN` / `MODEL_FAST` are the two model envs (`LLM_MODEL`
