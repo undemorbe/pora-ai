@@ -529,12 +529,45 @@ def _norm(s: str) -> str:
     return _WS_RE.sub(" ", s.lower()).strip()
 
 
+def _build_synonym_lookup() -> dict:
+    """word → tuple of alternatives, both directions, built once at import."""
+    lookup: dict[str, tuple[str, ...]] = {}
+    for a, b in C.INGREDIENT_SYNONYM_PAIRS:
+        lookup[a] = lookup.get(a, ()) + (b,)
+        lookup[b] = lookup.get(b, ()) + (a,)
+    return lookup
+
+
+_SYNONYMS = _build_synonym_lookup()
+
+
+def _name_in_source(name: str, haystack: str) -> bool:
+    """Match an ingredient name against the source with graceful degradation.
+
+    1. verbatim substring;
+    2. singular-strip: "eggs" matches a source that only has "egg";
+    3. cross-lingual synonym bridge (constants.INGREDIENT_SYNONYM_PAIRS) —
+       the LLM sometimes translates the name it extracts.
+    """
+    if len(name) < 3:
+        return False
+    if name in haystack:
+        return True
+    if name.endswith("s") and len(name) >= 4 and name[:-1] in haystack:
+        return True
+    for alt in _SYNONYMS.get(name, ()):
+        if alt in haystack:
+            return True
+    return False
+
+
 def validate_against_source(ingredients: list[dict], source_text: str) -> list[dict]:
     """Drop ingredients whose ``raw`` or ``name`` is not present in the source.
 
     Anti-hallucination guard: LLM may invent ingredients that aren't in the page.
-    We require either the full ``raw`` line OR a sufficiently long ``name`` to appear
-    verbatim (case-insensitive, whitespace-collapsed) in the source text.
+    We require the full ``raw`` line OR the ``name`` to appear in the source —
+    verbatim, singular-stripped, or through the RU↔EN synonym bridge
+    (see ``_name_in_source``). Case-insensitive, whitespace-collapsed.
     """
     haystack = _norm(source_text)
     kept: list[dict] = []
@@ -543,7 +576,7 @@ def validate_against_source(ingredients: list[dict], source_text: str) -> list[d
         name = _norm(ing.get("name") or "")
         if raw and raw in haystack:
             kept.append(ing)
-        elif name and len(name) >= 3 and name in haystack:
+        elif name and _name_in_source(name, haystack):
             kept.append(ing)
     return kept
 

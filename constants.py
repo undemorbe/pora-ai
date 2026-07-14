@@ -291,6 +291,30 @@ TIP_FALLBACKS: dict[str, str] = {
 ACCEPT_LANGUAGE_DEFAULT = "en-US,en;q=0.9"
 
 # ==========================================================================
+# Ingredient synonyms — cross-lingual bridge for validate_against_source
+# ==========================================================================
+# Problem being solved: the LLM sometimes normalizes/translates an ingredient
+# name (page says "молоко", model returns name="milk"). The verbatim
+# anti-hallucination check would wrongly drop it. Each pair below is treated
+# as bidirectional; pora_llm builds the lookup once at import.
+INGREDIENT_SYNONYM_PAIRS: tuple[tuple[str, str], ...] = (
+    ("молоко", "milk"), ("яйца", "eggs"), ("яйцо", "egg"),
+    ("сыр", "cheese"), ("мука", "flour"), ("сахар", "sugar"),
+    ("соль", "salt"), ("масло", "butter"), ("вода", "water"),
+    ("курица", "chicken"), ("говядина", "beef"), ("свинина", "pork"),
+    ("рис", "rice"), ("паста", "pasta"), ("спагетти", "spaghetti"),
+    ("хлеб", "bread"), ("помидоры", "tomatoes"), ("помидор", "tomato"),
+    ("лук", "onion"), ("чеснок", "garlic"), ("морковь", "carrot"),
+    ("картофель", "potato"), ("перец", "pepper"), ("сливки", "cream"),
+    ("сметана", "sour cream"), ("творог", "cottage cheese"),
+    ("бекон", "bacon"), ("лосось", "salmon"), ("креветки", "shrimp"),
+    ("грибы", "mushrooms"), ("гриб", "mushroom"), ("лимон", "lemon"),
+    ("мёд", "honey"), ("орехи", "nuts"), ("шоколад", "chocolate"),
+    ("корица", "cinnamon"), ("ваниль", "vanilla"), ("дрожжи", "yeast"),
+    ("уксус", "vinegar"), ("капуста", "cabbage"),
+)
+
+# ==========================================================================
 # HTML entity decoding (used by html_to_text)
 # ==========================================================================
 HTML_ENTITIES: dict[str, str] = {

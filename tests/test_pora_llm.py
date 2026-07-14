@@ -259,6 +259,28 @@ class TestValidateAgainstSource:
         assert len(out) == 1
         assert out[0]["raw"] == "Eggs 4"
 
+    def test_translated_name_kept_via_synonym_bridge(self):
+        # RU page, LLM normalized the name to English — must survive
+        ings = [{"raw": "milk 200 ml", "name": "milk"}]
+        out = ai.validate_against_source(ings, "Рецепт: молоко 200 мл, мука 3 ст.л.")
+        assert out == ings
+
+    def test_synonym_bridge_works_both_directions(self):
+        ings = [{"raw": "сыр 100 г", "name": "сыр"}]
+        out = ai.validate_against_source(ings, "Recipe: cheese 100 g, bread")
+        assert out == ings
+
+    def test_plural_name_matches_singular_source(self):
+        ings = [{"raw": "2 large eggs", "name": "eggs"}]
+        out = ai.validate_against_source(ings, "take one egg and whisk")
+        assert out == ings
+
+    def test_unrelated_translation_still_dropped(self):
+        # synonym bridge must not let arbitrary words through
+        ings = [{"raw": "unicorn 1", "name": "unicorn"}]
+        out = ai.validate_against_source(ings, "молоко, мука, сахар")
+        assert out == []
+
 
 # --------------------------------------------------------------------------
 # extract_jsonld
