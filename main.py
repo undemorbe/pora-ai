@@ -35,6 +35,21 @@ def health():
             "refusal_langs": sorted(ai.REFUSALS)}
 
 
+@app.get("/metrics")
+def metrics():
+    """Операционная телеметрия (JSON): LLM-вызовы/ошибки/латенси/токены по
+    видам моделей + статистика кэшей. Счётчики кумулятивные с момента старта
+    процесса; сервис остаётся stateless по пользовательским данным."""
+    from _metrics import METRICS
+    return {
+        "llm": METRICS.snapshot(),
+        "caches": {
+            "categorize": ai._categorize_cache.stats(),
+            "recipe": ai._recipe_cache.stats(),
+        },
+    }
+
+
 def _parse_dates(purchases):
     try:
         return [{"product": p.product, "date": dt.date.fromisoformat(p.date)} for p in purchases]

@@ -349,6 +349,7 @@ LLM_BASE_URL=https://api.openai.com/v1 LLM_API_KEY=sk-... LLM_MODEL=gpt-4o-mini 
 | Метод и путь | Назначение | Нужен ли LLM |
 |---|---|---|
 | `GET /health` | Проверка живости и конфигурации | нет |
+| `GET /metrics` | Телеметрия: LLM-вызовы/ошибки/латенси/токены + статистика кэшей | нет |
 | `POST /v1/replenishment` | Прогноз «когда закончится продукт» | нет |
 | `POST /v1/categorize` | Раздел магазина для названий товаров | нет для ru/en; да для остальных языков и кастомных секций |
 | `POST /v1/notify-time` | Лучший час push-уведомления | нет |
@@ -373,6 +374,34 @@ curl http://localhost:8000/health
 `LLM_MODEL_FAST` не задана), `sections` (канонические ключи разделов),
 `fast_langs` (языки быстрого классификатора), `refusal_langs` (языки
 локализованных отказов).
+
+### 6.1.1. `GET /metrics` — телеметрия
+
+Кумулятивные счётчики с момента старта процесса. Тела нет.
+
+```bash
+curl http://localhost:8000/metrics
+```
+
+```json
+{
+  "llm": {
+    "uptime_s": 3600.5,
+    "llm_calls": {"fast": 120, "main": 15},
+    "llm_errors": {"fast": 2, "main": 0},
+    "llm_latency_ms_total": {"fast": 84000.0, "main": 30500.0},
+    "tokens": {"prompt": 45000, "completion": 9000}
+  },
+  "caches": {
+    "categorize": {"size": 340, "hits": 812, "misses": 410},
+    "recipe": {"size": 12, "hits": 40, "misses": 14}
+  }
+}
+```
+
+Среднюю латенсию считайте на стороне потребителя:
+`llm_latency_ms_total[kind] / llm_calls[kind]`. Токены доступны, только если
+провайдер возвращает `usage` (облачные — да, Ollama — зависит от версии).
 
 ### 6.2. `POST /v1/replenishment` — прогноз пополнения
 

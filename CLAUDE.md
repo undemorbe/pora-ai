@@ -93,3 +93,10 @@ Three layers, strict separation. Touching one usually means touching the others 
   `constants.RECIPE_CATALOG` when absent/empty. All prompts, env names,
   fallback strings live in `constants.py` — never inline new ones in logic
   modules.
+- `validate_against_source` matches ingredient names through a ladder:
+  verbatim → singular-strip → RU↔EN synonym bridge
+  (`constants.INGREDIENT_SYNONYM_PAIRS`). Extend the pairs list when adding
+  languages, or translated ingredient names will be dropped as hallucinations.
+- `_metrics.METRICS` records every `_chat` round trip (calls/errors/latency/
+  tokens by model kind); `GET /metrics` exposes it + cache stats. Call
+  `METRICS.reset()` in test fixtures that assert on counters.

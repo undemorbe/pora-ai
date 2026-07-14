@@ -26,6 +26,7 @@ from pydantic import BaseModel, Field
 import brain
 import constants as C
 from _cache import TTLCache
+from _metrics import METRICS
 
 # --------------------------------------------------------------------------
 # Конфиг + ленивый клиент (не трогаем сеть на импорте)
@@ -173,13 +174,17 @@ def _chat(system: str, user: str, temperature: float = 0.4,
     if response_format:
         kwargs["response_format"] = response_format
 
+    t0 = time.monotonic()
     for attempt in range(C.LLM_MAX_RETRIES + 1):
         try:
             resp = client().chat.completions.create(**kwargs)
+            METRICS.record(model_kind, time.monotonic() - t0, ok=True,
+                           usage=getattr(resp, "usage", None))
             return resp.choices[0].message.content
         except Exception as e:
             is_transient = transient and isinstance(e, transient)
             if not is_transient or attempt == C.LLM_MAX_RETRIES:
+                METRICS.record(model_kind, time.monotonic() - t0, ok=False)
                 return None
             time.sleep(C.LLM_RETRY_BACKOFF_S * (attempt + 1))
     return None
