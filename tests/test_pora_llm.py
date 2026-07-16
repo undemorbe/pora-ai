@@ -509,6 +509,61 @@ class TestParseRecipe:
         assert recipe.title == "Pasta"
         assert recipe.ingredients[0].section in brain.SECTIONS
 
+    def test_low_confidence_ingredients_escalate_to_llm(self, monkeypatch, mock_chat):
+        # "Cool Whip" is nothing like the RU/EN training data → the fast
+        # classifier is unsure → the LLM must be asked instead of shipping a
+        # low-confidence guess.
+        html = ('<html><script type="application/ld+json">{"@type":"Recipe","name":"X",'
+                '"recipeIngredient":["молоко","Cool Whip"]}</script></html>')
+        monkeypatch.setattr(ai, "web_fetch", lambda *a, **kw: _fake_fetch(html))
+
+        seen = {"names": None}
+
+        def responder(system, user, **kw):
+            seen["names"] = user
+            return '{"results": [{"name": "Cool Whip", "section": "dairy"}]}'
+
+        mock_chat(responder)
+        import brain
+        recipe = ai.parse_recipe("http://x", brain.Categorizer().fit())
+        by_raw = {i.raw: i.section for i in recipe.ingredients}
+        assert by_raw["Cool Whip"] == "dairy"          # LLM answer used
+        assert by_raw["молоко"] == "dairy"             # confident fast answer kept
+        # only the weak label was sent — the confident one costs no tokens
+        assert "Cool Whip" in seen["names"]
+        assert "молоко" not in seen["names"]
+
+    def test_no_escalation_when_fast_classifier_is_confident(self, monkeypatch):
+        html = ('<html><script type="application/ld+json">{"@type":"Recipe","name":"X",'
+                '"recipeIngredient":["молоко"]}</script></html>')
+        monkeypatch.setattr(ai, "web_fetch", lambda *a, **kw: _fake_fetch(html))
+        monkeypatch.setattr(ai, "_chat",
+                            lambda *a, **kw: (_ for _ in ()).throw(AssertionError("must not call LLM")))
+        import brain
+        recipe = ai.parse_recipe("http://x", brain.Categorizer().fit())
+        assert recipe.ingredients[0].section == "dairy"
+
+    def test_escalation_skipped_when_llm_disabled(self, monkeypatch):
+        # LLM off → keep the fast guess, never raise
+        html = ('<html><script type="application/ld+json">{"@type":"Recipe","name":"X",'
+                '"recipeIngredient":["Cool Whip"]}</script></html>')
+        monkeypatch.setattr(ai, "web_fetch", lambda *a, **kw: _fake_fetch(html))
+        monkeypatch.setattr(ai, "API_KEY", "")
+        import brain
+        recipe = ai.parse_recipe("http://x", brain.Categorizer().fit())
+        assert recipe.ingredients[0].section in brain.SECTIONS
+
+    def test_failed_llm_escalation_keeps_fast_guess(self, monkeypatch, mock_chat):
+        html = ('<html><script type="application/ld+json">{"@type":"Recipe","name":"X",'
+                '"recipeIngredient":["Cool Whip"]}</script></html>')
+        monkeypatch.setattr(ai, "web_fetch", lambda *a, **kw: _fake_fetch(html))
+        mock_chat("garbage not json")     # LLM fails → fall back to fast guess
+        import brain
+        cat = brain.Categorizer().fit()
+        expected = cat.predict("Cool Whip")[0]
+        recipe = ai.parse_recipe("http://x", cat)
+        assert recipe.ingredients[0].section == expected
+
     def test_custom_sections_route_to_batched_llm(self, monkeypatch, mock_chat):
         html = '<html><script type="application/ld+json">{"@type":"Recipe","name":"R","recipeIngredient":["bacon","eggs"]}</script></html>'
         monkeypatch.setattr(ai, "web_fetch", lambda *a, **kw: _fake_fetch(html))

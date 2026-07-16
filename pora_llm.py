@@ -637,6 +637,32 @@ def extract_recipe_from_text(text: str) -> dict:
     }
 
 
+def _tag_with_escalation(labels: list[str], categorizer: brain.Categorizer) -> list[str]:
+    """Section per label using the fast classifier, escalating weak guesses to the LLM.
+
+    Mirrors the /v1/categorize routing rule: a fast answer below
+    ``FAST_ESCALATE_CONF_BELOW`` is not trustworthy, so those labels go to the
+    LLM — all of them in ONE batched call. Ingredient lines are noisy
+    ("1 (16 ounce) container Cool Whip") and often unlike the training data,
+    so without this the fast classifier ships confident-looking nonsense.
+
+    The fast guess survives whenever the LLM is disabled or fails.
+    """
+    fast = categorizer.predict_batch(labels) if labels else []
+    result = [sec if label else C.DEFAULT_FALLBACK_SECTION
+              for label, (sec, _conf) in zip(labels, fast)]
+
+    weak = [i for i, (label, (_sec, conf)) in enumerate(zip(labels, fast))
+            if label and conf < C.FAST_ESCALATE_CONF_BELOW]
+    if not weak or not llm_enabled():
+        return result
+
+    for i, (sec, conf) in zip(weak, categorize_llm_batch([labels[i] for i in weak])):
+        if conf >= C.LLM_CONF_HIGH:      # keep the fast guess if the LLM failed
+            result[i] = sec
+    return result
+
+
 def parse_recipe(url: str, categorizer: brain.Categorizer,
                  sections: Optional[list[str]] = None, lang: Optional[str] = None) -> Recipe:
     """Full URL → Recipe pipeline (cached by URL + sections + lang)."""
@@ -662,9 +688,10 @@ def parse_recipe(url: str, categorizer: brain.Categorizer,
             for ing, (sec, _conf) in zip(ings, tagged):
                 ing["section"] = sec if (ing.get("name") or ing.get("raw")) else fallback
         else:
-            for ing in ings:
-                label = ing.get("name") or ing.get("raw") or ""
-                ing["section"] = categorizer.predict(label)[0] if label else C.DEFAULT_FALLBACK_SECTION
+            labels = [ing.get("name") or ing.get("raw") or "" for ing in ings]
+            tagged = _tag_with_escalation(labels, categorizer)
+            for ing, sec in zip(ings, tagged):
+                ing["section"] = sec
 
     recipe = Recipe.model_validate(data)
     if _CACHE_ENABLED and data.get("source") in ("jsonld", "llm"):
