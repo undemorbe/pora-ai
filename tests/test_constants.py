@@ -45,9 +45,6 @@ class TestLLMPlumbing:
         assert 0 < C.FAST_ESCALATE_CONF_BELOW < 1
         assert 0 <= C.LLM_CONF_LOW < C.LLM_CONF_HIGH <= 1
 
-    def test_fetch_retry_statuses_are_5xx_or_429(self):
-        for s in C.FETCH_RETRY_STATUSES:
-            assert s == 429 or 500 <= s < 600
 
     def test_temperatures_in_range(self):
         for t in (C.TEMPERATURE_STRICT, C.TEMPERATURE_CHAT,
@@ -163,9 +160,6 @@ class TestCacheDefaults:
         assert C.CATEGORIZE_CACHE_SIZE > 0
         assert C.CATEGORIZE_CACHE_TTL_S > 0
 
-    def test_recipe_cache_defaults(self):
-        assert C.RECIPE_CACHE_SIZE > 0
-        assert C.RECIPE_CACHE_TTL_S > 0
 
     def test_cache_env_name(self):
         assert C.CACHE_ENABLED_ENV == "PORA_CACHE_ENABLED"

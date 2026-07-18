@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
-"""Tests for _recipe_parse — the pure-Python (no LLM) recipe extractor."""
+"""Tier 2 — pure-Python parser (recipe.parser)."""
 from __future__ import annotations
 
-from _recipe_parse import parse_ingredients_html, split_quantity
+from recipe.parser import parse_ingredients_html, split_quantity
 
 
 class TestSplitQuantity:

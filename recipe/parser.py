@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Pure-Python recipe extraction — the free tier between JSON-LD and the LLM.
+"""Tier 2 — pure-Python recipe extraction. Free, fast, no LLM.
 
 Most recipe sites without JSON-LD still mark their ingredients up in a way a
 parser can find: schema.org microdata, an ``ingredient``-ish CSS class, or a
@@ -18,7 +18,7 @@ import re
 from html.parser import HTMLParser
 from typing import Optional
 
-import constants as C
+from . import constants as RC
 
 _WS_RE = re.compile(r"\s+")
 _SKIP_TAGS = frozenset({"script", "style", "noscript", "template"})
@@ -153,14 +153,14 @@ def _attr_blob(rec: dict) -> str:
 # --------------------------------------------------------------------------
 # Candidate scoring / validation
 # --------------------------------------------------------------------------
-_QTY_RE = re.compile(C.QTY_UNIT_PATTERN, re.I)
+_QTY_RE = re.compile(RC.QTY_UNIT_PATTERN, re.I)
 
 
 def _is_heading_line(s: str) -> bool:
     """A block heading ("Продукты (на 13 порций)") is not an ingredient."""
     low = s.lower()
-    return (len(s) <= C.PARSER_HEADING_MAX_LEN
-            and any(h in low for h in C.PARSER_INGREDIENT_HEADINGS))
+    return (len(s) <= RC.PARSER_HEADING_MAX_LEN
+            and any(h in low for h in RC.PARSER_INGREDIENT_HEADINGS))
 
 
 def _drop_wrappers(lines: list[str]) -> list[str]:
@@ -188,7 +188,7 @@ def _clean_candidates(lines: list[str]) -> list[str]:
     seen: set[str] = set()
     for line in lines:
         s = _norm(line)
-        if not (C.PARSER_MIN_LINE_LEN <= len(s) <= C.PARSER_MAX_LINE_LEN):
+        if not (RC.PARSER_MIN_LINE_LEN <= len(s) <= RC.PARSER_MAX_LINE_LEN):
             continue
         if _is_heading_line(s):
             continue
@@ -207,12 +207,12 @@ def _looks_like_ingredients(lines: list[str], trusted: bool) -> bool:
     heuristic must also *look* like a shopping list — a decent share of the
     lines carrying a quantity+unit.
     """
-    if len(lines) < C.PARSER_MIN_INGREDIENTS:
+    if len(lines) < RC.PARSER_MIN_INGREDIENTS:
         return False
     if trusted:
         return True
     with_qty = sum(1 for s in lines if _QTY_RE.search(s))
-    return with_qty / len(lines) >= C.PARSER_MIN_QTY_RATIO
+    return with_qty / len(lines) >= RC.PARSER_MIN_QTY_RATIO
 
 
 # --------------------------------------------------------------------------
@@ -233,9 +233,9 @@ def _by_class_name(records: list[dict]) -> list[str]:
     records whose text is short enough to be a single ingredient.
     """
     hits = [r for r in records
-            if any(m in _attr_blob(r) for m in C.PARSER_INGREDIENT_CLASS_MARKERS)]
+            if any(m in _attr_blob(r) for m in RC.PARSER_INGREDIENT_CLASS_MARKERS)]
     lines = [r["text"] for r in hits
-             if len(_norm(r["text"])) <= C.PARSER_MAX_LINE_LEN]
+             if len(_norm(r["text"])) <= RC.PARSER_MAX_LINE_LEN]
     return lines
 
 
@@ -247,8 +247,8 @@ def _by_heading(records: list[dict]) -> list[str]:
     start = None
     for r in records:
         text = _norm(r["text"]).lower()
-        if len(text) <= C.PARSER_HEADING_MAX_LEN and any(
-                h in text for h in C.PARSER_INGREDIENT_HEADINGS):
+        if len(text) <= RC.PARSER_HEADING_MAX_LEN and any(
+                h in text for h in RC.PARSER_INGREDIENT_HEADINGS):
             start = r["order"]
             break
     if start is None:
@@ -259,7 +259,7 @@ def _by_heading(records: list[dict]) -> list[str]:
         if r["order"] <= start or r["tag"] not in ("h1", "h2", "h3", "h4"):
             continue
         text = _norm(r["text"]).lower()
-        if not any(h in text for h in C.PARSER_INGREDIENT_HEADINGS):
+        if not any(h in text for h in RC.PARSER_INGREDIENT_HEADINGS):
             stop = r["order"]
             break
 
@@ -306,10 +306,10 @@ def parse_ingredients_html(html: str) -> Optional[dict]:
         if not _looks_like_ingredients(lines, trusted):
             continue
         ingredients = []
-        for raw in lines[:C.PARSER_MAX_INGREDIENTS]:
+        for raw in lines[:RC.PARSER_MAX_INGREDIENTS]:
             name, qty, unit = split_quantity(raw)
             ingredients.append({"raw": raw, "name": name, "qty": qty, "unit": unit})
         return {"title": _extract_title(records),
                 "ingredients": ingredients,
-                "source": "parser"}
+                "source": RC.SOURCE_PARSER}
     return None

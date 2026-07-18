@@ -150,10 +150,11 @@ class TestRecommend:
 class TestParseRecipeEndpoint:
     @staticmethod
     def _patch_fetch(monkeypatch, html: str):
-        import pora_llm
-        monkeypatch.setattr(pora_llm, "web_fetch",
+        import recipe
+        from recipe import pipeline as rp
+        monkeypatch.setattr(rp, "web_fetch",
                             lambda *a, **kw: {"url": "http://x", "status": 200, "html": html,
-                                              "text": pora_llm.html_to_text(pora_llm.extract_main_content(html))})
+                                              "text": recipe.html_to_text(recipe.extract_main_content(html))})
 
     def test_jsonld_path(self, client, monkeypatch):
         html = '<script type="application/ld+json">{"@type":"Recipe","name":"Carbonara","recipeIngredient":["Spaghetti 400g","Eggs 4"]}</script>'
@@ -194,13 +195,13 @@ class TestParseRecipeEndpoint:
         assert sorted(i["section"] for i in body["ingredients"]) == ["greens", "meat"]
 
     def test_fetch_failure_returns_502(self, client, monkeypatch):
-        import pora_llm
         import httpx as _httpx
+        from recipe import pipeline as rp
 
         def _boom(*a, **kw):
             raise _httpx.RequestError("dns fail")
 
-        monkeypatch.setattr(pora_llm, "web_fetch", _boom)
+        monkeypatch.setattr(rp, "web_fetch", _boom)
         r = client.post("/v1/parse-recipe", json={"url": "http://nope"})
         assert r.status_code == 502
 

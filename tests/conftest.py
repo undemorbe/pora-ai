@@ -28,11 +28,14 @@ def _clear_pora_caches():
     of leakage that is easy to miss and hard to debug.
     """
     import pora_llm
-    pora_llm._categorize_cache.clear()
-    pora_llm._recipe_cache.clear()
+    from recipe import pipeline as recipe_pipeline
+
+    caches = (pora_llm._categorize_cache, recipe_pipeline._recipe_cache)
+    for c in caches:
+        c.clear()
     yield
-    pora_llm._categorize_cache.clear()
-    pora_llm._recipe_cache.clear()
+    for c in caches:
+        c.clear()
 
 
 @pytest.fixture

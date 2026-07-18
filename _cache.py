@@ -12,10 +12,21 @@ Stats are plain counters, not atomic — best-effort.
 """
 from __future__ import annotations
 
+import os
 import threading
 import time
 from collections import OrderedDict
 from typing import Any, Optional
+
+import constants as C
+
+
+def cache_enabled_from_env() -> bool:
+    """Read the PORA_CACHE_ENABLED switch. Shared by every cache owner."""
+    raw = os.getenv(C.CACHE_ENABLED_ENV)
+    if raw is None:
+        return C.CACHE_ENABLED_DEFAULT
+    return raw.strip().lower() not in C.ENV_FALSY
 
 
 class TTLCache:

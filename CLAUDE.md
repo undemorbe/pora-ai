@@ -60,13 +60,14 @@ Three layers, strict separation. Touching one usually means touching the others 
   - `detect_lang` — script-based (Cyrillic/CJK/diacritics), no deps.
   - `chat` flow: `guard_on_topic` regex blocklist runs BEFORE the LLM call; off-topic → localized refusal, no tokens spent.
   - `categorize_llm` / `extract_recipe_from_text` use OpenAI structured-output (`response_format=json_schema, strict=True`). Section enum mirrors `brain.SECTIONS`.
-  - `parse_recipe`: HTTP fetch → `extract_jsonld` (free path) → LLM fallback over **stripped HTML text** (`html_to_text`) → `validate_against_source` drops any ingredient whose `raw`/`name` does not literally appear in the source (anti-hallucination guard) → quick classifier tags each ingredient with a section. Walks `@graph` and `@type` arrays for JSON-LD recipes. If LLM hallucinates everything, `source` flips back to `"none"` and ingredients are empty.
   - `suggest_dish_llm` — JSON-schema-constrained LLM dish suggester used by `/v1/suggest` for the `dish` slot. Returns `None` when LLM disabled.
   - `REFUSALS` — 15 languages; unknown lang → English.
 
 - **`main.py`** — thin FastAPI endpoints. `/v1/categorize` is the only place where the routing rule lives: `lang ∈ {ru, en}` → fast classifier (and escalate to LLM only when `confidence < 0.45` AND LLM enabled), other languages → LLM directly. Keep that routing in `main.py`, not inside `brain` or `pora_llm`. `/v1/suggest` is the only endpoint that fuses multiple `brain.suggest_*` engines + an LLM dish slot through `brain.merge_suggestions` — keep the fusion glue here, suggestion engines stay pure in `brain.py`.
 
-- **`llm.py`** — deprecated shim, re-exports from `pora_llm`. Do not add new code here; do not delete (Go-side or older imports may reference it).
+- **`recipe/`** — recipe fetcher feature package (see the conventions below). `main.py` calls only `recipe.parse_recipe`.
+
+- **`llm.py`** — deprecated shim, re-exports from `pora_llm` and `recipe`. Do not add new code here; do not delete (Go-side or older imports may reference it).
 
 - **`client_example.go`** — reference Go client. Update when the wire contract in `schemas.py` changes.
 
@@ -81,8 +82,10 @@ Three layers, strict separation. Touching one usually means touching the others 
   and optional `LLM_MODEL_FAST`). Every LLM call site declares its
   `model_kind` (fast for categorize/dish/tip, main for chat/recipe_extract).
   `pora_llm.MODEL` is retained as a backward-compat alias for external code.
-- `pora_llm._categorize_cache` and `_recipe_cache` are per-process TTL caches.
-  Set `PORA_CACHE_ENABLED=0` to bypass; call `.clear()` between test runs.
+- Per-process TTL caches: `pora_llm._categorize_cache` and
+  `recipe.pipeline._recipe_cache`. Both honour `PORA_CACHE_ENABLED=0` via the
+  shared `_cache.cache_enabled_from_env`; the autouse `_clear_pora_caches`
+  fixture wipes both between tests.
 - `pora_llm._chat_model(system, user, model_cls, ...)` is the canonical entry
   for structured JSON calls — it does one retry-on-validation-error with the
   pydantic error carried into the corrective prompt.
@@ -93,20 +96,26 @@ Three layers, strict separation. Touching one usually means touching the others 
   `constants.RECIPE_CATALOG` when absent/empty. All prompts, env names,
   fallback strings live in `constants.py` — never inline new ones in logic
   modules.
-- `validate_against_source` matches ingredient names through a ladder:
+- `recipe.validate_against_source` matches ingredient names through a ladder:
   verbatim → singular-strip → RU↔EN synonym bridge
-  (`constants.INGREDIENT_SYNONYM_PAIRS`). Extend the pairs list when adding
-  languages, or translated ingredient names will be dropped as hallucinations.
+  (`recipe/constants.py:INGREDIENT_SYNONYM_PAIRS`). Extend the pairs when
+  adding languages, or translated names get dropped as hallucinations.
 - `_metrics.METRICS` records every `_chat` round trip (calls/errors/latency/
   tokens by model kind); `GET /metrics` exposes it + cache stats. Call
   `METRICS.reset()` in test fixtures that assert on counters.
-- `parse_recipe` runs three extraction tiers, cheapest first: `extract_jsonld`
-  → `_recipe_parse.parse_ingredients_html` (stdlib HTML parser: microdata /
-  CSS class / heading+list) → `extract_recipe_from_text` (LLM). Each tier
-  reports itself in `Recipe.source` (`jsonld|parser|llm|none`). Add a new site
-  pattern to the parser's constants before reaching for the LLM — tier 3 is
-  the slow, paid path.
-- The LLM tier receives `_recipe_window(text)`, not `text[:cap]`: ingredient
+- Recipe parsing is a self-contained feature package: **`recipe/`**
+  (`fetch` → `jsonld` → `parser` → `extract` → `sections` → `pipeline`).
+  Only `recipe.parse_recipe` is meant to be called from outside; import it as
+  `import recipe`, never reach into submodules from `main.py`.
+- Dependency direction is one-way: `recipe` → `pora_llm`/`brain`. Neither may
+  import `recipe` back, or the package stops being liftable.
+- Three extraction tiers, cheapest first, reported in `Recipe.source`
+  (`jsonld|parser|llm|none`). Add a new site pattern to
+  `recipe/constants.py` before reaching for the LLM — tier 3 is slow and paid.
+- Feature knobs live in `recipe/constants.py`; service-wide config stays in
+  the root `constants.py`. `tests/recipe/test_constants.py` enforces that
+  boundary in both directions.
+- The LLM tier receives `recipe_window(text)`, not `text[:cap]`: ingredient
   blocks sit far down long pages, so the window is chosen by quantity+unit
   density. Keep `LLM_TEXT_CAP` well under the model's context (Cyrillic ≈
   2 chars/token).

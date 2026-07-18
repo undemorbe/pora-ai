@@ -36,7 +36,7 @@ jobs:
           pip install -r requirements.txt
 
       - name: Compile check
-        run: python -m compileall -q brain.py pora_llm.py main.py schemas.py constants.py llm.py
+        run: python -m compileall -q brain.py pora_llm.py main.py schemas.py constants.py llm.py recipe/
 
       - name: Run pytest
         run: pytest -q --tb=short

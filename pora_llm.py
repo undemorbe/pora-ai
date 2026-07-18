@@ -5,6 +5,9 @@
   Ollama:  LLM_BASE_URL=http://localhost:11434/v1  LLM_API_KEY=ollama   LLM_MODEL=qwen3
   Облако:  LLM_BASE_URL=https://api.openai.com/v1   LLM_API_KEY=sk-...    LLM_MODEL=gpt-4o-mini
 
+Разбор рецептов вынесен в пакет ``recipe`` — здесь только LLM-обвязка,
+язык, категоризация, чат и советы.
+
 Мультиязычность: определяем язык запроса (или берём из параметра locale), отвечаем
 на этом языке, отказы локализованы, категоризация через LLM работает на любом языке.
 
@@ -20,14 +23,12 @@ import re
 import time
 from typing import Optional, TypeVar
 
-import httpx
 from pydantic import BaseModel, Field
 
 import brain
 import constants as C
-from _cache import TTLCache
+from _cache import TTLCache, cache_enabled_from_env
 from _metrics import METRICS
-from _recipe_parse import parse_ingredients_html
 
 # --------------------------------------------------------------------------
 # Конфиг + ленивый клиент (не трогаем сеть на импорте)
@@ -46,18 +47,10 @@ _client = None
 
 
 # --------------------------------------------------------------------------
-# In-process caches — categorize (per name+sections) and parse_recipe (per URL)
+# In-process cache for categorization (per name + sections)
 # --------------------------------------------------------------------------
-def _cache_enabled_from_env() -> bool:
-    raw = os.getenv(C.CACHE_ENABLED_ENV)
-    if raw is None:
-        return C.CACHE_ENABLED_DEFAULT
-    return raw.strip().lower() not in C.ENV_FALSY
-
-
-_CACHE_ENABLED = _cache_enabled_from_env()
+_CACHE_ENABLED = cache_enabled_from_env()
 _categorize_cache = TTLCache(C.CATEGORIZE_CACHE_SIZE, C.CATEGORIZE_CACHE_TTL_S)
-_recipe_cache = TTLCache(C.RECIPE_CACHE_SIZE, C.RECIPE_CACHE_TTL_S)
 
 
 def llm_enabled() -> bool:
@@ -72,10 +65,10 @@ def client():
     return _client
 
 
-# Re-exports so external callers keep the pora_llm.<name> surface stable
+# Re-exports so external callers keep the pora_llm.<name> surface stable.
+# (User-Agent and other fetch knobs now belong to the `recipe` package.)
 REFUSALS = C.REFUSALS
 SCOPE_SYSTEM = C.SCOPE_SYSTEM
-DEFAULT_USER_AGENT = C.DEFAULT_USER_AGENT
 
 
 # --------------------------------------------------------------------------
@@ -307,11 +300,6 @@ class _DishResponse(BaseModel):
     reason: str
 
 
-class _RecipeResponse(BaseModel):
-    title: Optional[str] = None
-    ingredients: list[dict] = Field(default_factory=list)
-
-
 def _fallback_section(sections: list[str]) -> str:
     return C.DEFAULT_FALLBACK_SECTION if C.DEFAULT_FALLBACK_SECTION in sections else sections[0]
 
@@ -428,317 +416,3 @@ def generate_tip(top_cuisine: str, frequent: list[str], lang: str = "en") -> dic
         return {"tip": out.strip(), "lang": lang, "source": "llm"}
     template = C.TIP_FALLBACKS.get(lang, C.TIP_FALLBACKS["en"])
     return {"tip": template.format(cuisine=top_cuisine), "lang": lang, "source": "fallback"}
-
-
-# ---- рецепты: JSON-LD (бесплатно) → LLM-фолбэк, любой язык ----
-class Ingredient(BaseModel):
-    raw: str
-    name: Optional[str] = None
-    qty: Optional[float] = None
-    unit: Optional[str] = None
-    section: str = C.DEFAULT_FALLBACK_SECTION
-
-
-class Recipe(BaseModel):
-    title: Optional[str] = None
-    ingredients: list[Ingredient] = Field(default_factory=list)
-    source: str = "none"
-
-
-_RECIPE_SCHEMA = {
-    "type": "object", "additionalProperties": False, "required": ["title", "ingredients"],
-    "properties": {
-        "title": {"type": ["string", "null"]},
-        "ingredients": {"type": "array", "items": {
-            "type": "object", "additionalProperties": False,
-            "required": ["raw", "name", "qty", "unit"],
-            "properties": {"raw": {"type": "string"}, "name": {"type": ["string", "null"]},
-                           "qty": {"type": ["number", "null"]}, "unit": {"type": ["string", "null"]}},
-        }},
-    },
-}
-
-
-# --------------------------------------------------------------------------
-# HTML utils + browser-like web fetch + anti-hallucination validation
-# --------------------------------------------------------------------------
-_HTML_TAG_RE = re.compile(r"<[^>]+>")
-_SCRIPT_STYLE_RE = re.compile(r"<(script|style|noscript)[^>]*>.*?</\1>", re.S | re.I)
-_BOILER_RE = re.compile(r"<(nav|header|footer|aside|form)\b[^>]*>.*?</\1>", re.S | re.I)
-_MAIN_CONTENT_RE = re.compile(r"<(main|article)\b[^>]*>(.*?)</\1>", re.S | re.I)
-_WS_RE = re.compile(r"\s+")
-
-
-def html_to_text(html: str) -> str:
-    """Strip <script>/<style>, tags, decode common entities, collapse whitespace."""
-    s = _SCRIPT_STYLE_RE.sub(" ", html)
-    s = _HTML_TAG_RE.sub(" ", s)
-    for k, v in C.HTML_ENTITIES.items():
-        s = s.replace(k, v)
-    return _WS_RE.sub(" ", s).strip()
-
-
-def _accept_language(lang: Optional[str]) -> str:
-    if not lang:
-        return C.ACCEPT_LANGUAGE_DEFAULT
-    lang = lang.split("-")[0].lower()
-    return f"{lang},{lang};q=0.9,en;q=0.5"
-
-
-def extract_main_content(html: str) -> str:
-    """Pick the main content of an HTML page: first <main>/<article>, else strip boilerplate."""
-    m = _MAIN_CONTENT_RE.search(html)
-    if m:
-        return m.group(2)
-    return _BOILER_RE.sub(" ", html)
-
-
-def web_fetch(url: str, lang: Optional[str] = None,
-              timeout: float = C.FETCH_TIMEOUT_S,
-              max_bytes: int = C.FETCH_MAX_BYTES,
-              retries: int = C.FETCH_RETRIES) -> dict:
-    """Browser-like HTTP fetch with realistic headers, retries on 429/5xx, and content extraction.
-
-    Returns ``{"url", "status", "html", "text"}``: the final URL after redirects, status code,
-    the truncated raw HTML, and the readable plain text from the main content area.
-
-    Raises ``httpx.HTTPError`` if every attempt fails.
-    """
-    headers = {
-        "User-Agent": C.DEFAULT_USER_AGENT,
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": _accept_language(lang),
-        "Accept-Encoding": "gzip, deflate",
-        "DNT": "1",
-        "Upgrade-Insecure-Requests": "1",
-    }
-    last_exc: Optional[Exception] = None
-    with httpx.Client(timeout=timeout, follow_redirects=True, headers=headers) as cli:
-        for attempt in range(retries + 1):
-            try:
-                r = cli.get(url)
-                if r.status_code in C.FETCH_RETRY_STATUSES and attempt < retries:
-                    continue
-                r.raise_for_status()
-                html = r.text[:max_bytes]
-                return {"url": str(r.url), "status": r.status_code,
-                        "html": html, "text": html_to_text(extract_main_content(html))}
-            except httpx.HTTPError as e:
-                last_exc = e
-                if attempt == retries:
-                    raise
-    assert last_exc is not None
-    raise last_exc
-
-
-def _norm(s: str) -> str:
-    return _WS_RE.sub(" ", s.lower()).strip()
-
-
-def _build_synonym_lookup() -> dict:
-    """word → tuple of alternatives, both directions, built once at import."""
-    lookup: dict[str, tuple[str, ...]] = {}
-    for a, b in C.INGREDIENT_SYNONYM_PAIRS:
-        lookup[a] = lookup.get(a, ()) + (b,)
-        lookup[b] = lookup.get(b, ()) + (a,)
-    return lookup
-
-
-_SYNONYMS = _build_synonym_lookup()
-
-
-def _name_in_source(name: str, haystack: str) -> bool:
-    """Match an ingredient name against the source with graceful degradation.
-
-    1. verbatim substring;
-    2. singular-strip: "eggs" matches a source that only has "egg";
-    3. cross-lingual synonym bridge (constants.INGREDIENT_SYNONYM_PAIRS) —
-       the LLM sometimes translates the name it extracts.
-    """
-    if len(name) < 3:
-        return False
-    if name in haystack:
-        return True
-    if name.endswith("s") and len(name) >= 4 and name[:-1] in haystack:
-        return True
-    for alt in _SYNONYMS.get(name, ()):
-        if alt in haystack:
-            return True
-    return False
-
-
-def validate_against_source(ingredients: list[dict], source_text: str) -> list[dict]:
-    """Drop ingredients whose ``raw`` or ``name`` is not present in the source.
-
-    Anti-hallucination guard: LLM may invent ingredients that aren't in the page.
-    We require the full ``raw`` line OR the ``name`` to appear in the source —
-    verbatim, singular-stripped, or through the RU↔EN synonym bridge
-    (see ``_name_in_source``). Case-insensitive, whitespace-collapsed.
-    """
-    haystack = _norm(source_text)
-    kept: list[dict] = []
-    for ing in ingredients:
-        raw = _norm(ing.get("raw") or "")
-        name = _norm(ing.get("name") or "")
-        if raw and raw in haystack:
-            kept.append(ing)
-        elif name and _name_in_source(name, haystack):
-            kept.append(ing)
-    return kept
-
-
-def _iter_recipe_nodes(data):
-    stack = [data]
-    while stack:
-        node = stack.pop()
-        if isinstance(node, list):
-            stack.extend(node)
-        elif isinstance(node, dict):
-            if "@graph" in node:
-                g = node["@graph"]
-                stack.extend(g if isinstance(g, list) else [g])
-            t = node.get("@type")
-            for x in (t if isinstance(t, list) else [t]):
-                if x and str(x).lower() == "recipe":
-                    yield node
-
-
-def extract_jsonld(html: str) -> Optional[dict]:
-    for b in re.findall(r'<script[^>]*type=["\']application/ld\+json["\'][^>]*>(.*?)</script>', html, re.S | re.I):
-        try:
-            data = json.loads(b.strip())
-        except Exception:
-            continue
-        for node in _iter_recipe_nodes(data):
-            ings = node.get("recipeIngredient") or node.get("ingredients")
-            if ings:
-                ings = [ings] if isinstance(ings, str) else ings
-                return {"title": node.get("name"),
-                        "ingredients": [{"raw": str(i).strip(), "name": None, "qty": None, "unit": None} for i in ings],
-                        "source": "jsonld"}
-    return None
-
-
-_QTY_UNIT_RE = re.compile(C.QTY_UNIT_PATTERN, re.I)
-
-
-def _recipe_window(text: str, cap: int = C.LLM_TEXT_CAP) -> str:
-    """Pick the cap-sized slice of ``text`` most likely to hold the ingredients.
-
-    Naively sending ``text[:cap]`` breaks on real pages: old table-based
-    layouts (and any site without <main>/<article>) put navigation first and
-    the ingredient block thousands of characters down — the model then reads
-    a menu and correctly reports "no recipe", after burning a full inference.
-
-    Heuristic: ingredients are where quantity+unit pairs cluster ("550 г",
-    "2 cups"). Slide a cap-sized window over those hits and keep the densest
-    one, with a little lead-in so the "Продукты"/"Ingredients" heading and the
-    first line survive. No hits (e.g. a prose page) → fall back to the head.
-    """
-    if len(text) <= cap:
-        return text
-    hits = [m.start() for m in _QTY_UNIT_RE.finditer(text)]
-    if not hits:
-        return text[:cap]
-
-    lead = int(cap * C.RECIPE_WINDOW_LEAD)
-    best_start, best_count = 0, 0
-    for h in hits:
-        start = max(0, h - lead)
-        end = start + cap
-        count = sum(1 for x in hits if start <= x < end)
-        if count > best_count:
-            best_start, best_count = start, count
-    return text[best_start:best_start + cap]
-
-
-def extract_recipe_from_text(text: str) -> dict:
-    """LLM-based extraction with anti-hallucination validation against source text."""
-    resp = _chat_model(
-        C.RECIPE_EXTRACT_SYSTEM, _recipe_window(text), _RecipeResponse,
-        examples=C.FEW_SHOT_EXAMPLES.get("recipe_extract"),
-        response_format={"type": "json_schema",
-                         "json_schema": {"name": "recipe", "strict": True, "schema": _RECIPE_SCHEMA}},
-        model_kind=C.LLM_MODEL_ROUTING["recipe_extract"],
-    )
-    if resp is None:
-        return {"title": None, "ingredients": [], "source": "none"}
-    validated = validate_against_source(resp.ingredients, text)
-    return {
-        "title": resp.title,
-        "ingredients": validated,
-        "source": "llm" if validated else "none",
-    }
-
-
-def _tag_with_escalation(labels: list[str], categorizer: brain.Categorizer) -> list[str]:
-    """Section per label using the fast classifier, escalating weak guesses to the LLM.
-
-    Mirrors the /v1/categorize routing rule: a fast answer below
-    ``FAST_ESCALATE_CONF_BELOW`` is not trustworthy, so those labels go to the
-    LLM — all of them in ONE batched call. Ingredient lines are noisy
-    ("1 (16 ounce) container Cool Whip") and often unlike the training data,
-    so without this the fast classifier ships confident-looking nonsense.
-
-    The fast guess survives whenever the LLM is disabled or fails.
-    """
-    fast = categorizer.predict_batch(labels) if labels else []
-    result = [sec if label else C.DEFAULT_FALLBACK_SECTION
-              for label, (sec, _conf) in zip(labels, fast)]
-
-    weak = [i for i, (label, (_sec, conf)) in enumerate(zip(labels, fast))
-            if label and conf < C.FAST_ESCALATE_CONF_BELOW]
-    if not weak or not llm_enabled():
-        return result
-
-    for i, (sec, conf) in zip(weak, categorize_llm_batch([labels[i] for i in weak])):
-        if conf >= C.LLM_CONF_HIGH:      # keep the fast guess if the LLM failed
-            result[i] = sec
-    return result
-
-
-def parse_recipe(url: str, categorizer: brain.Categorizer,
-                 sections: Optional[list[str]] = None, lang: Optional[str] = None) -> Recipe:
-    """Full URL → Recipe pipeline (cached by URL + sections + lang).
-
-    Three extraction tiers, cheapest first — the LLM is a last resort:
-      1. ``extract_jsonld``        — schema.org JSON-LD. Free, exact.
-      2. ``parse_ingredients_html`` — pure-Python parser (microdata / CSS class /
-         heading+list). Free, fast, covers most sites that lack JSON-LD.
-      3. ``extract_recipe_from_text`` — LLM over the ingredient-dense window.
-         Slow and paid, so it only runs when both free tiers came up empty.
-
-    The winning tier is reported back in ``Recipe.source``
-    (``jsonld`` | ``parser`` | ``llm`` | ``none``).
-    """
-    key = ("recipe", url, tuple(sorted(sections or ())), lang or "")
-    if _CACHE_ENABLED:
-        cached = _recipe_cache.get(key)
-        if cached is not None:
-            return Recipe.model_validate(cached)
-
-    fetched = web_fetch(url, lang=lang)
-    html, text = fetched["html"], fetched["text"]
-
-    data = extract_jsonld(html) or parse_ingredients_html(html)
-    if not data:
-        data = extract_recipe_from_text(text)
-
-    ings = data.get("ingredients") or []
-    if ings:
-        if sections:
-            labels = [ing.get("name") or ing.get("raw") or "" for ing in ings]
-            tagged = categorize_llm_batch(labels, sections)
-            fallback = _fallback_section(sections)
-            for ing, (sec, _conf) in zip(ings, tagged):
-                ing["section"] = sec if (ing.get("name") or ing.get("raw")) else fallback
-        else:
-            labels = [ing.get("name") or ing.get("raw") or "" for ing in ings]
-            tagged = _tag_with_escalation(labels, categorizer)
-            for ing, sec in zip(ings, tagged):
-                ing["section"] = sec
-
-    recipe = Recipe.model_validate(data)
-    if _CACHE_ENABLED and data.get("source") in C.RECIPE_CACHEABLE_SOURCES:
-        _recipe_cache.set(key, recipe.model_dump())
-    return recipe

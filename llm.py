@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
-"""DEPRECATED: модуль объединён в pora_llm.py (мультиязычный).
-Оставлен как тонкий шим для обратной совместимости — используйте pora_llm.
+"""DEPRECATED: используйте ``pora_llm`` (LLM) и ``recipe`` (разбор рецептов).
 
-Экспорты обновлены под текущую поверхность API v2 (web_fetch, batched
-categorize, anti-hallucination, dynamic sections).
+Тонкий шим для обратной совместимости — оставлен, чтобы старые импорты
+(в том числе со стороны Go-интеграции) не сломались. Новый код должен брать
+функции напрямую из соответствующего модуля.
 """
 from pora_llm import (  # noqa: F401
     # core
@@ -18,13 +18,18 @@ from pora_llm import (  # noqa: F401
     # categorization
     categorize_llm,
     categorize_llm_batch,
-    # recipes
+)
+
+# Разбор рецептов переехал в пакет ``recipe`` (три ступени: JSON-LD →
+# Python-парсер → LLM). Имена сохранены прежними.
+from recipe import (  # noqa: F401
     parse_recipe,
     extract_jsonld,
     extract_recipe_from_text,
     validate_against_source,
-    # HTTP / HTML utilities
     web_fetch,
     html_to_text,
     extract_main_content,
+    Recipe,
+    Ingredient,
 )

@@ -13,6 +13,7 @@ from fastapi import FastAPI, HTTPException
 import brain
 import constants as C
 import pora_llm as ai
+import recipe
 from schemas import (
     BriefRequest, CategorizeRequest, ChatRequest, NotifyTimeRequest,
     ParseRecipeRequest, RecommendRequest, ReplenishmentRequest, SuggestRequest, TipRequest,
@@ -45,7 +46,7 @@ def metrics():
         "llm": METRICS.snapshot(),
         "caches": {
             "categorize": ai._categorize_cache.stats(),
-            "recipe": ai._recipe_cache.stats(),
+            "recipe": recipe.pipeline._recipe_cache.stats(),
         },
     }
 
@@ -151,7 +152,7 @@ def parse_recipe(req: ParseRecipeRequest):
     the supplied taxonomy.
     """
     try:
-        return ai.parse_recipe(req.url, _cat, sections=req.sections, lang=req.lang).model_dump()
+        return recipe.parse_recipe(req.url, _cat, sections=req.sections, lang=req.lang).model_dump()
     except Exception as e:
         raise HTTPException(502, f"fetch/parse failed: {e}")
 

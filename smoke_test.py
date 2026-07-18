@@ -6,6 +6,7 @@ import datetime as dt
 from fastapi.testclient import TestClient
 
 import pora_llm as ai
+import recipe
 from main import app
 
 c = TestClient(app)
@@ -46,6 +47,6 @@ print("\n— detect_lang:",
 
 # JSON-LD парсер офлайн
 html = '<script type="application/ld+json">{"@type":"Recipe","name":"Carbonara","recipeIngredient":["Spaghetti 400g","Eggs 4"]}</script>'
-print("— extract_jsonld:", ai.extract_jsonld(html))
+print("— extract_jsonld (ступень 1):", recipe.extract_jsonld(html))
 
 print("\n✅ офлайн smoke test пройден")
