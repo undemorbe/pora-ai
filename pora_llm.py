@@ -27,6 +27,7 @@ import brain
 import constants as C
 from _cache import TTLCache
 from _metrics import METRICS
+from _recipe_parse import parse_ingredients_html
 
 # --------------------------------------------------------------------------
 # Конфиг + ленивый клиент (не трогаем сеть на импорте)
@@ -618,10 +619,43 @@ def extract_jsonld(html: str) -> Optional[dict]:
     return None
 
 
+_QTY_UNIT_RE = re.compile(C.QTY_UNIT_PATTERN, re.I)
+
+
+def _recipe_window(text: str, cap: int = C.LLM_TEXT_CAP) -> str:
+    """Pick the cap-sized slice of ``text`` most likely to hold the ingredients.
+
+    Naively sending ``text[:cap]`` breaks on real pages: old table-based
+    layouts (and any site without <main>/<article>) put navigation first and
+    the ingredient block thousands of characters down — the model then reads
+    a menu and correctly reports "no recipe", after burning a full inference.
+
+    Heuristic: ingredients are where quantity+unit pairs cluster ("550 г",
+    "2 cups"). Slide a cap-sized window over those hits and keep the densest
+    one, with a little lead-in so the "Продукты"/"Ingredients" heading and the
+    first line survive. No hits (e.g. a prose page) → fall back to the head.
+    """
+    if len(text) <= cap:
+        return text
+    hits = [m.start() for m in _QTY_UNIT_RE.finditer(text)]
+    if not hits:
+        return text[:cap]
+
+    lead = int(cap * C.RECIPE_WINDOW_LEAD)
+    best_start, best_count = 0, 0
+    for h in hits:
+        start = max(0, h - lead)
+        end = start + cap
+        count = sum(1 for x in hits if start <= x < end)
+        if count > best_count:
+            best_start, best_count = start, count
+    return text[best_start:best_start + cap]
+
+
 def extract_recipe_from_text(text: str) -> dict:
     """LLM-based extraction with anti-hallucination validation against source text."""
     resp = _chat_model(
-        C.RECIPE_EXTRACT_SYSTEM, text[:C.LLM_TEXT_CAP], _RecipeResponse,
+        C.RECIPE_EXTRACT_SYSTEM, _recipe_window(text), _RecipeResponse,
         examples=C.FEW_SHOT_EXAMPLES.get("recipe_extract"),
         response_format={"type": "json_schema",
                          "json_schema": {"name": "recipe", "strict": True, "schema": _RECIPE_SCHEMA}},
@@ -665,7 +699,18 @@ def _tag_with_escalation(labels: list[str], categorizer: brain.Categorizer) -> l
 
 def parse_recipe(url: str, categorizer: brain.Categorizer,
                  sections: Optional[list[str]] = None, lang: Optional[str] = None) -> Recipe:
-    """Full URL → Recipe pipeline (cached by URL + sections + lang)."""
+    """Full URL → Recipe pipeline (cached by URL + sections + lang).
+
+    Three extraction tiers, cheapest first — the LLM is a last resort:
+      1. ``extract_jsonld``        — schema.org JSON-LD. Free, exact.
+      2. ``parse_ingredients_html`` — pure-Python parser (microdata / CSS class /
+         heading+list). Free, fast, covers most sites that lack JSON-LD.
+      3. ``extract_recipe_from_text`` — LLM over the ingredient-dense window.
+         Slow and paid, so it only runs when both free tiers came up empty.
+
+    The winning tier is reported back in ``Recipe.source``
+    (``jsonld`` | ``parser`` | ``llm`` | ``none``).
+    """
     key = ("recipe", url, tuple(sorted(sections or ())), lang or "")
     if _CACHE_ENABLED:
         cached = _recipe_cache.get(key)
@@ -675,7 +720,7 @@ def parse_recipe(url: str, categorizer: brain.Categorizer,
     fetched = web_fetch(url, lang=lang)
     html, text = fetched["html"], fetched["text"]
 
-    data = extract_jsonld(html)
+    data = extract_jsonld(html) or parse_ingredients_html(html)
     if not data:
         data = extract_recipe_from_text(text)
 
@@ -694,6 +739,6 @@ def parse_recipe(url: str, categorizer: brain.Categorizer,
                 ing["section"] = sec
 
     recipe = Recipe.model_validate(data)
-    if _CACHE_ENABLED and data.get("source") in ("jsonld", "llm"):
+    if _CACHE_ENABLED and data.get("source") in C.RECIPE_CACHEABLE_SOURCES:
         _recipe_cache.set(key, recipe.model_dump())
     return recipe

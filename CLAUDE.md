@@ -100,3 +100,15 @@ Three layers, strict separation. Touching one usually means touching the others 
 - `_metrics.METRICS` records every `_chat` round trip (calls/errors/latency/
   tokens by model kind); `GET /metrics` exposes it + cache stats. Call
   `METRICS.reset()` in test fixtures that assert on counters.
+- `parse_recipe` runs three extraction tiers, cheapest first: `extract_jsonld`
+  → `_recipe_parse.parse_ingredients_html` (stdlib HTML parser: microdata /
+  CSS class / heading+list) → `extract_recipe_from_text` (LLM). Each tier
+  reports itself in `Recipe.source` (`jsonld|parser|llm|none`). Add a new site
+  pattern to the parser's constants before reaching for the LLM — tier 3 is
+  the slow, paid path.
+- The LLM tier receives `_recipe_window(text)`, not `text[:cap]`: ingredient
+  blocks sit far down long pages, so the window is chosen by quantity+unit
+  density. Keep `LLM_TEXT_CAP` well under the model's context (Cyrillic ≈
+  2 chars/token).
+- Use an **instruct** model, never a reasoning one (qwen3 etc.): reasoning
+  models loop for minutes on JSON extraction. qwen2.5 / deepseek-chat are fine.

@@ -118,6 +118,31 @@ DEFAULT_USER_AGENT = (
 )
 
 # ==========================================================================
+# Pure-Python recipe parser (see _recipe_parse) — the free tier before the LLM
+# ==========================================================================
+# CSS class / id / itemprop fragments that mark an ingredient element.
+PARSER_INGREDIENT_CLASS_MARKERS: tuple[str, ...] = (
+    "ingredient", "ingr", "recipe-item", "product-item", "sostav",
+)
+# Headings that introduce the ingredient block (lowercase, substring match).
+PARSER_INGREDIENT_HEADINGS: tuple[str, ...] = (
+    "ингредиент", "продукты", "состав", "нам понадобится", "потребуется",
+    "ingredient", "you will need", "what you need",
+)
+PARSER_HEADING_MAX_LEN = 60         # a heading is short; a paragraph is not
+PARSER_MIN_LINE_LEN = 2
+PARSER_MAX_LINE_LEN = 200           # longer ⇒ a prose block, not an ingredient
+PARSER_MIN_INGREDIENTS = 2          # fewer ⇒ not confident, hand over to the LLM
+PARSER_MAX_INGREDIENTS = 60         # cap runaway matches
+# Share of candidate lines that must carry a quantity+unit for an untrusted
+# (heuristic) strategy to be believed. Guards against parsing a nav menu.
+PARSER_MIN_QTY_RATIO = 0.5
+
+# Extraction outcomes worth caching. "none" is excluded on purpose: a failed
+# parse is often transient (site hiccup, LLM outage) and must be retryable.
+RECIPE_CACHEABLE_SOURCES: frozenset[str] = frozenset({"jsonld", "parser", "llm"})
+
+# ==========================================================================
 # In-process cache (see _cache.TTLCache)
 # ==========================================================================
 CATEGORIZE_CACHE_SIZE = 2048
@@ -141,7 +166,25 @@ LLM_MODEL_DEFAULT = "qwen3"
 # Values treated as "disabled" for boolean env flags (compared lowercase)
 ENV_FALSY: frozenset[str] = frozenset({"0", "false", "no", "off"})
 
-LLM_TEXT_CAP = 8_000                # chars fed to extract_recipe_from_text
+# Chars of page text fed to extract_recipe_from_text. Deliberately modest:
+# _recipe_window now targets the ingredient block precisely, so a big cap buys
+# nothing but tokens. It also has to fit the model's context — Cyrillic costs
+# ~2 chars/token, so 4000 chars ≈ 2000 tokens, leaving room for the few-shot
+# block and the system prompt inside a 4096-token default (local Ollama).
+LLM_TEXT_CAP = 4_000
+
+# Quantity+unit signature used to locate the ingredient block inside a long
+# page (see pora_llm._recipe_window). Feeding the LLM the first N chars of a
+# page is wrong: old-school layouts put navigation first and the ingredients
+# thousands of chars down. Matches "550 г", "2 cups", "1 ст. л.", "3 шт".
+QTY_UNIT_PATTERN = (
+    r"\d+[.,]?\d*\s*"
+    r"(?:г|кг|мл|л|шт|зубчик|щепотк|ст\.?\s*л|ч\.?\s*л|стакан|пучок|банк|"
+    r"g|kg|ml|l|oz|lb|cup|cups|tbsp|tsp|pcs|clove|pinch|can)\b"
+)
+# Fraction of the window kept as context BEFORE the first ingredient hit
+# (the block usually starts with a heading like "Продукты" / "Ingredients").
+RECIPE_WINDOW_LEAD = 0.25
 LLM_CONF_HIGH = 0.9                 # returned when structured output succeeds
 LLM_CONF_LOW = 0.0                  # returned on any failure / disabled
 
